@@ -1680,7 +1680,14 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
         # Agent-level tools that need live AIAgent state; table shared with invoke_tool.
         inline_executor = INLINE_TOOL_EXECUTORS[function_name]
         inline_ctx = InlineToolContext(effective_task_id=effective_task_id, tool_call_id=tool_call_id, messages=messages)
-        return _SequentialDispatch(lambda next_args: inline_executor(agent, next_args, inline_ctx), finish_in_finally=False)
+        # Same per-call policy as the registry and concurrent paths: one inline tool that
+        # raises costs its own call, not the turn — otherwise the exception escapes as
+        # "Error during API call" for EVERY call in the message (#141188).
+        return _SequentialDispatch(
+            lambda next_args: inline_executor(agent, next_args, inline_ctx), finish_in_finally=False,
+            error_result=lambda e: f"Error executing tool '{function_name}': {e}",
+            error_log="inline tool executor raised for %s: %s",
+        )
     if function_name == "delegate_task":
         spinner = _start_quiet_tool_spinner(agent, function_name, function_args, label=_delegate_spinner_label(function_args))
         agent._delegate_spinner = spinner
