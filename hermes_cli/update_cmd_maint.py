@@ -495,6 +495,26 @@ def _invalidate_live_plugin_catalog_caches() -> None:
             invalidate_live_cache_for_home(profile_home)
 
 
+def _invalidate_model_catalog_caches() -> None:
+    """Drop the cached model catalogs under the active home AND every sibling profile's.
+
+    The provider and models.dev snapshots are keyed to credentials and age, never to the installed
+    build: a copy cached before this update keeps answering the picker (for the whole 7-day
+    stale-serve window while a live probe fails), so models the new build ships never appear
+    (#141101). The checkout is shared across profiles, so the drop sweeps siblings like the
+    state.db guard. Never raises — :func:`models_cache_invalidation.invalidate_for_home` is
+    best-effort per home.
+    """
+    from hermes_cli.update_cmd import get_hermes_home
+    from hermes_cli.models_cache_invalidation import invalidate_for_home
+    home = get_hermes_home()
+    invalidate_for_home(home)
+    with suppress(Exception):
+        from hermes_cli.backup import _sibling_profile_homes
+        for _name, profile_home in _sibling_profile_homes(home):
+            invalidate_for_home(profile_home)
+
+
 def _print_bundled_skills_sync_report() -> None:
     """Run ``sync_skills`` (copies new, updates changed, respects user deletions) and print its summary."""
     from tools.skills_sync import sync_skills
@@ -1028,6 +1048,11 @@ def _run_post_update_maintenance(
     # rest of the cache TTL (#119340).
     with _best_effort('Live plugin catalog cache invalidation failed: %s'):
         _invalidate_live_plugin_catalog_caches()
+
+    # Drop the cached model catalogs under every profile too: their keys never notice the version
+    # bump, so a pre-update snapshot keeps serving the old catalog (#141101).
+    with _best_effort('Model catalog cache invalidation failed: %s'):
+        _invalidate_model_catalog_caches()
 
     with _best_effort('Skills sync during update failed: %s'):
         print()

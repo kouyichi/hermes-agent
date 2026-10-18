@@ -163,6 +163,20 @@ def step_drop_live_plugin_catalog() -> dict:
     return {"ok": True}
 
 
+def step_drop_model_catalog_caches() -> dict:
+    """Drop the active home's cached model catalogs after a code change.
+
+    Provider and models.dev snapshots are keyed to credentials and wall-clock age, never to the
+    installed build, so a pre-update copy keeps serving the old catalog for the whole stale-serve
+    window while the live probe fails (#141101). Bundled/sealed updates never run ``hermes
+    update``'s tail, so this is a boot step like the live plugin catalog's.
+    """
+    from hermes_constants import get_hermes_home
+    from hermes_cli.models_cache_invalidation import invalidate_for_home
+
+    return {"ok": True, "dropped": invalidate_for_home(get_hermes_home())}
+
+
 def step_adopt_blessed_checkout(project_root: Path | None = None) -> dict:
     """One-time adoption of shipped stampless installs (birth certificate).
 
@@ -300,6 +314,7 @@ HOME_STEPS: tuple = (
     ("sync_skills", step_sync_skills),
     ("state_db_guard", step_state_db_guard),
     ("drop_live_plugin_catalog", step_drop_live_plugin_catalog),
+    ("drop_model_catalog_caches", step_drop_model_catalog_caches),
     ("expose_cli", expose_cli),
 )
 
