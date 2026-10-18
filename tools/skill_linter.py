@@ -23,6 +23,17 @@ _SHELL_UTIL_TO_TOOL: dict[str, str] = {
     "grep": "search_files", "rg": "search_files", "cat": "read_file", "head": "read_file",
     "tail": "read_file", "sed": "patch", "awk": "patch",
     "find": "search_files (target='files')", "ls": "search_files (target='files')"}
+# The standard's own wording is "reference Hermes tools, not raw shell"
+# (skills/AGENTS.md), so a sentence that names the native tool — or explicitly
+# tells the reader to prefer it — is the guidance being asked for, not a
+# violation. Only a bare mention steers the model to the shell. Same for a
+# markdown table row, which enumerates what a skill depends on rather than
+# instructing a call.
+_NATIVE_TOOL_REFERENCE = re.compile(
+    r"`(?:terminal|read_file|write_file|patch|search_files|web_search|web_extract|"
+    r"browser_navigate|vision_analyze|delegate_task|cronjob)`")
+_DEFERRING_CUE = re.compile(
+    r"\b(?:prefer|instead of|rather than|avoid|do not|don't|never)\b", re.IGNORECASE)
 _MARKETING_WORDS = (
     "powerful", "comprehensive", "seamless", "advanced", "cutting-edge", "state-of-the-art",
     "revolutionary", "robust")
@@ -40,8 +51,10 @@ _POSIX_PRIMITIVES = (
 # Scaffolding files a skill should not ship (noise, not skill content).
 _FORBIDDEN_FILES = ("README.md", "CHANGELOG.md", "install.sh", ".env", ".env.example", ".gitignore")
 # Presence of the load-bearing section is checked, not exact ordering, so the
-# linter is not a change-detector.
-_EXPECTED_SECTIONS = ("When to Use", "When to use")
+# linter is not a change-detector. Matched case-insensitively: the standard names
+# the heading `## When to Use`, and shipped skills spell it `## When To Use`,
+# `## WHEN TO USE` and `## When to use this skill` — all the same section.
+_EXPECTED_SECTIONS = ("When to use",)
 # incident-log-shape: at least this many PR/issue refs AND this density (per 1k chars of prose).
 _INCIDENT_REF_MIN = 4
 _INCIDENT_REF_PER_KCHAR = 0.5  # the 100k incident-log SKILL.md this targets sat at ~0.7
@@ -134,10 +147,15 @@ def _check_body(body: str, skill_dir: Optional[Path]) -> Iterator[LintFinding]:
     # Only backtick-wrapped mentions in PROSE (not fenced code): bare words are too noisy.
     prose = _strip_code_blocks(body)
     for util, tool in _SHELL_UTIL_TO_TOOL.items():
-        if re.search(rf"`{re.escape(util)}`", prose):
+        mention = re.compile(rf"`{re.escape(util)}`")
+        if any(mention.search(line)
+               and not _NATIVE_TOOL_REFERENCE.search(line) and not _DEFERRING_CUE.search(line)
+               and not line.lstrip().startswith("|")
+               for line in prose.splitlines()):
             yield _warn("shell-utility-reference",
                         f"prose references `{util}`; name the native tool `{tool}` instead.")
-    if not any(re.search(rf"^#+\s+{re.escape(s)}", body, re.MULTILINE) for s in _EXPECTED_SECTIONS):
+    if not any(re.search(rf"^#+\s+{re.escape(s)}", body, re.MULTILINE | re.IGNORECASE)
+               for s in _EXPECTED_SECTIONS):
         yield _warn("missing-section", "no '## When to Use' section found; skills need explicit "
                     "trigger conditions near the top.")
     # Incident-log shape: a skill body dense in PR/issue numbers is narrating history instead of
@@ -153,7 +171,7 @@ def _check_body(body: str, skill_dir: Optional[Path]) -> Iterator[LintFinding]:
     seen: set[str] = set()
     for match in re.finditer(r"(references|templates|assets)/[\w./-]+", body):
         rel = match.group(0)
-        if rel in seen or "*" in rel or rel.endswith("/"):  # dupes, placeholders, globs
+        if rel in seen or "*" in rel or "..." in rel or rel.endswith("/"):  # dupes, placeholders, globs
             continue
         seen.add(rel)
         if not (skill_dir / rel).exists():

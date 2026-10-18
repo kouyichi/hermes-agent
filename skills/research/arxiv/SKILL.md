@@ -26,7 +26,7 @@ Search and retrieve academic papers from arXiv via their free REST API. No API k
 
 ## Searching Papers
 
-The API returns Atom XML. Parse with `grep`/`sed` or pipe through `python` for clean output.
+The API returns Atom XML. Run the query through `terminal` and parse it with the Python snippet below — the raw feed is not readable output on its own.
 
 ### Basic search
 
