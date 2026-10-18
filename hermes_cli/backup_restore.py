@@ -437,6 +437,29 @@ def _default_new_file_mode() -> Optional[int]:
     return 0o666 & ~current
 
 
+def _archive_member_mode(zf: zipfile.ZipFile, member: str) -> Optional[int]:
+    """The Unix mode the archive recorded for *member*, or ``None``.
+
+    ``ZipFile.write`` stores ``st_mode`` in the upper 16 bits of
+    ``external_attr``, so a backup already carries the executability of every
+    file it captured — the restore side simply never read it, and a script or a
+    staged language-server binary came back at ``0644`` after a restore
+    (GitHub #141088).
+
+    Masked to ``0o777``: setuid/setgid/sticky never come out of an archive, for
+    the same reason the caller strips them from an existing target — both the
+    bytes and the bits would then be archive-controlled.  ``None`` means the
+    entry records nothing usable (``ZipFile.writestr``'s default, an archive
+    built where POSIX modes do not exist), and the caller keeps its previous
+    fallback.
+    """
+    try:
+        mode = zf.getinfo(member).external_attr >> 16
+    except KeyError:
+        return None
+    return (mode & 0o777) or None
+
+
 def _extract_member_atomically(
     zf: zipfile.ZipFile,
     member: str,
@@ -466,7 +489,11 @@ def _extract_member_atomically(
 
     Permission bits *and* ownership are carried across the replace so routing
     through mkstemp does not change the file the caller would otherwise have
-    produced.  ``os.replace`` swaps in a temp file owned by the *writing* user,
+    produced.  A target the import *creates* has no permissions of its own to
+    carry, so the mode the archive recorded for the member is used instead of
+    the umask-derived default (``_archive_member_mode``); a file that already
+    exists keeps its own, as before.  ``os.replace`` swaps in a temp file owned
+    by the *writing* user,
     so without the chown a ``sudo hermes import`` would silently re-own every
     restored file to root — on the disaster-recovery path, and on exactly the
     Docker/NAS installs ``utils._restore_file_owner`` documents.  Both concerns
@@ -484,12 +511,17 @@ def _extract_member_atomically(
     target.
     """
     # ``_preserve_file_mode`` returns None when the target does not exist (or
-    # cannot be stat'd), in which case the umask-derived create-mode applies —
-    # the same shape as ``atomic_yaml_write``'s ``create_mode`` fallback.
+    # cannot be stat'd).  A file the restore *creates* is a copy of an archived
+    # one, so the mode the archive recorded is the right answer for it — an
+    # executable must not come back as the umask default (#141088).  Only when
+    # the entry records no mode does the umask-derived create-mode apply — the
+    # same shape as ``atomic_yaml_write``'s ``create_mode`` fallback.
     mode = _preserve_file_mode(target)
     owner = _preserve_file_owner(target)
     if mode is None:
-        mode = new_file_mode
+        mode = _archive_member_mode(zf, member)
+        if mode is None:
+            mode = new_file_mode
     else:
         # Deliberately NOT a faithful mode copy: setuid/setgid are dropped.
         # ``_preserve_file_mode`` returns ``stat.S_IMODE``, i.e. all twelve
