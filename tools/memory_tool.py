@@ -247,6 +247,46 @@ def _invalid(message: str) -> tuple[str, str]:
     return "rejected", tool_error(message, success=False)
 
 
+# What to tell the model once an argument is refused for its TYPE. A JSON list is the
+# common shape (the model batches several facts into one call), so the hint names the
+# batch form that keeps all of them.
+_STRING_ARG_HINTS = {
+    "content": ("To save several facts, send one 'add' per fact, or an 'operations' batch with "
+                "one {action: 'add', content: '<one fact>'} object per fact."),
+    "old_text": "old_text is a short unique substring of the entry to match.",
+    "new_text": "new_text is the replacement text for 'patch'.",
+}
+
+
+def _non_string_arg_error(values: dict[str, Any], *, prefix: str = "") -> Optional[str]:
+    """Name the first argument whose value is not a string (``None`` = omitted).
+
+    The schema declares these as strings but nothing enforced it: ``content.strip()``
+    raised ``AttributeError`` inside the store, which the inline dispatch reported as a
+    failed API call for the WHOLE assistant message, and ``patch`` silently stringified
+    a list into the entry (#141188). Refuse here, where the argument is still nameable."""
+    for name, value in values.items():
+        if value is None or isinstance(value, str):
+            continue
+        return (f"{prefix}'{name}' must be a string, got {type(value).__name__}. "
+                f"{_STRING_ARG_HINTS.get(name, '')}").rstrip()
+    return None
+
+
+def _batch_args_error(operations: list) -> Optional[str]:
+    """The first malformed batch entry: not an object, or a non-string string field."""
+    for position, op in enumerate(operations, 1):
+        if not isinstance(op, dict):
+            return (f"Operation {position} must be an object like {{action, content, old_text}}, "
+                    f"got {type(op).__name__}.")
+        if error := _non_string_arg_error(
+            {key: op.get(key) for key in ("content", "old_text", "new_text")},
+            prefix=f"Operation {position}: ",
+        ):
+            return error
+    return None
+
+
 def _memory_tool(action, target, content, old_text, new_text, operations, store) -> tuple[str, str]:
     """``(outcome, result_json)``: ``rejected`` when refused or held before touching the store."""
     # An omitted optional string can arrive as "" (#90468): let the new_text alias fill it.
@@ -258,6 +298,8 @@ def _memory_tool(action, target, content, old_text, new_text, operations, store)
     if operations:
         if not isinstance(operations, list):
             return _invalid("operations must be a list of {action, content?, old_text?} objects.")
+        if batch_error := _batch_args_error(operations):
+            return _invalid(batch_error)
         if any(isinstance(op, dict) and op.get("action") == "replace" for op in operations):
             return _invalid(_REPLACE_REMOVED)
         denied = _background_delete_gate(store, action, operations, target)
@@ -281,6 +323,10 @@ def _memory_tool(action, target, content, old_text, new_text, operations, store)
         return _invalid(_REPLACE_REMOVED)
     if action not in _STORE_ACTIONS:
         return _invalid(f"Unknown action '{action}'. Use: add, patch, remove")
+    # A non-string argument never reaches the store: it would raise mid-write (add/remove)
+    # or be stringified into the entry (patch) — see _non_string_arg_error.
+    if arg_error := _non_string_arg_error({"content": content, "old_text": old_text}):
+        return _invalid(arg_error)
     invalid = (_validate_single_op(store, action, target, content, old_text)
                or _background_delete_gate(store, action, None, target, content, old_text)
                or _apply_write_gate(store, action, target, content, old_text))
