@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from tools.mcp_tool_common import _core, _parse_boolish, mcp_server_enabled
+from tools import mcp_connect_cooldown as _cooldown
 from tools import mcp_tool_config as _config
 from tools import mcp_tool_errors as _errors
 from tools import mcp_tool_lifecycle as _lifecycle
@@ -43,13 +44,22 @@ def _discovery_connect_concurrency() -> int:
     return raw
 
 
-def _record_connect_failure(server_name: str) -> None:
-    """Stamp a geometric, capped retry cooldown after a failed connect (under ``_lock``)."""
+def _record_connect_failure(server_name: str, config: Optional[dict] = None) -> None:
+    """Stamp a geometric, capped retry cooldown after a failed connect (under ``_lock``).
+
+    The deadline is also published to ``<HERMES_HOME>/state/mcp_connect_cooldown.json``: discovery
+    runs in a fresh process per cron execution / CLI call / Desktop backend, and a process-local
+    deadline let a crash-looping server be spawned once by each of them (#141030).
+    """
     key = _server_key(server_name)
-    n = _core._server_connect_failures.get(key, 0) + 1
+    prior = _core._server_connect_failures.get(key)
+    if prior is None:
+        prior = _cooldown.published_failures(key, config)
+    n = prior + 1
     _core._server_connect_failures[key] = n
     backoff = min(_core._CONNECT_RETRY_BASE_BACKOFF_SEC * (2 ** (n - 1)), _core._CONNECT_RETRY_MAX_BACKOFF_SEC)
     _core._server_connect_retry_after[key] = time.monotonic() + backoff
+    _cooldown.record_failure(key, config, n, backoff)
 
 
 def _clear_connect_failure(server_name: str) -> None:
@@ -57,13 +67,25 @@ def _clear_connect_failure(server_name: str) -> None:
     key = _server_key(server_name)
     _core._server_connect_failures.pop(key, None)
     _core._server_connect_retry_after.pop(key, None)
+    _cooldown.clear(key)
 
 
-def _connect_cooldown_active(server_name: str) -> bool:
+def _connect_cooldown_active(server_name: str, config: Optional[dict] = None) -> bool:
     """True if ``server_name`` is still within its retry cooldown (this scope's connection: one
-    profile's failing ``x`` must not shadow another profile's healthy ``x``)."""
-    deadline = _core._server_connect_retry_after.get(_server_key(server_name))
-    return deadline is not None and time.monotonic() < deadline
+    profile's failing ``x`` must not shadow another profile's healthy ``x``).
+
+    ``config`` opts into the cross-process half: the deadline another process published for the same
+    connection key and the same server config. Callers that have no config (a lazy wake-up, a status
+    probe) still honour a published deadline, just without the fingerprint check."""
+    key = _server_key(server_name)
+    deadline = _core._server_connect_retry_after.get(key)
+    if deadline is not None:
+        # This process armed it: its monotonic deadline is the truth (same backoff, same instant).
+        return time.monotonic() < deadline
+    if key in _core._server_connect_failures:
+        # This process knows the key but holds no deadline: its cooldown has lapsed here.
+        return False
+    return _cooldown.remaining(key, config) > 0
 
 
 def _owner_scope_home() -> Optional[Path]:
@@ -215,14 +237,14 @@ def _resolve_server_lazy(name: str, config: dict) -> bool:
     return _parse_boolish(config.get("lazy", False), default=False)
 
 
-def _note_connect_failure(name: str, exc: BaseException) -> str:
+def _note_connect_failure(name: str, exc: BaseException, config: Optional[dict] = None) -> str:
     """Record a failed connect (under ``_lock``): error text for status, cooldown stamp."""
     message = _errors._format_connect_error(exc)
     with _core._lock:
         key = _server_key(name)
         _core._server_connecting.discard(key)
         _core._server_connect_errors[key] = message
-        _record_connect_failure(name)
+        _record_connect_failure(name, config)
     return message
 
 
@@ -270,7 +292,7 @@ def _ensure_lazy_server_connected(server_name: str) -> bool:
         if server is not None and server.session is not None:
             return True
         config = _core._lazy_server_configs.get(key)
-        if (not config or _connect_cooldown_active(server_name)
+        if (not config or _connect_cooldown_active(server_name, config)
                 or key in _core._server_connecting):
             return False
         _core._server_connecting.add(key)
@@ -283,7 +305,7 @@ def _ensure_lazy_server_connected(server_name: str) -> bool:
                                timeout=float(connect_timeout) + 30.0)
     except BaseException as exc:
         logger.warning("Lazy MCP connect failed for '%s': %s%s",
-                       server_name, _note_connect_failure(server_name, exc), _stderr_tail_note(server_name))
+                       server_name, _note_connect_failure(server_name, exc, config), _stderr_tail_note(server_name))
         return False
     _note_connect_success(server_name)
     with _core._lock:
@@ -373,7 +395,7 @@ def _select_new_servers(servers: dict[str, dict]) -> dict[str, dict]:
             k: v for k, v in servers.items()
             if keys[k] not in _core._servers and keys[k] not in _core._server_connecting
             and keys[k] not in _core._lazy_server_configs
-            and mcp_server_enabled(v) and not _connect_cooldown_active(k)}
+            and mcp_server_enabled(v) and not _connect_cooldown_active(k, v)}
         stale_cached = [_core._servers[keys[k]] for k, v in servers.items()
                         if keys[k] in _core._servers and mcp_server_enabled(v)
                         and getattr(_core._servers[keys[k]], "session", None) is None]
@@ -455,7 +477,7 @@ async def _discover_all(new_servers: dict[str, dict]) -> None:
     for name, result in zip(new_servers, results):
         if isinstance(result, BaseException):
             command = new_servers.get(name, {}).get("command")
-            message = _note_connect_failure(name, result)
+            message = _note_connect_failure(name, result, new_servers.get(name))
             logger.warning("Failed to connect to MCP server '%s'%s: %s%s",
                            name, f" (command={command})" if command else "", message,
                            _stderr_tail_note(name))
