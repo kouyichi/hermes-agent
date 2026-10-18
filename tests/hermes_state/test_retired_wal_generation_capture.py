@@ -255,6 +255,93 @@ def test_capture_refuses_to_guess_by_pathname(tmp_path, force_wal):
         db.close()
 
 
+# ── The database file itself unlinked under the writer ──────────────────────────────────────────────
+#
+# #140275: the profile's ``state.db`` was removed while a long-lived gateway and dashboard still held
+# the main inode and its ``-wal``/``-shm`` open. The documented remediation ("quit every process")
+# releases those descriptors, so the deleted inodes were the only surviving copy. Both guards fire
+# before any capture: ``_db_file_was_replaced()`` sees no file at the path and refuses as *replaced*,
+# so the retired-WAL capture never ran, and ``capture_retired_wal_generation`` reads the main image
+# by path, so it would have aborted with "cannot read the main image header" even if it had.
+
+
+@not_windows
+def test_halt_captures_the_generation_when_the_database_file_is_deleted(tmp_path, force_wal):
+    from hermes_state import StateDbReplacedError
+
+    path = tmp_path / "state.db"
+    db = make_db(path, "gw-0", "seed")
+    require_wal(db)
+    sentinel = _wal_only_sentinel(db, "gw-0")
+    lose_sidecars(path, rename=False)
+    os.unlink(path)  # the field incident: the base file goes too, only the fds keep it alive
+    assert not path.exists()
+
+    with pytest.raises(StateDbReplacedError):
+        db.append_message("gw-0", role="user", content="after the loss")
+    db.close()  # shutdown is where the capture is retried; today it aborts on the missing main image
+
+    artifact = db._retired_generation_capture
+    assert artifact is not None and artifact.is_dir(), "the only surviving copy was not captured"
+    manifest = _manifest(artifact)
+    assert manifest["main"]["mode"] == "copied" and manifest["main"]["header"]["valid"]
+    recovered = _recover(artifact, "state.db", tmp_path / "recovered")
+    try:
+        assert _count(recovered, sentinel) == 1
+        assert integrity_ok_conn(recovered)
+    finally:
+        recovered.close()
+
+
+@not_windows
+def test_capture_reads_the_main_image_from_the_open_descriptor_when_the_path_is_gone(tmp_path, force_wal):
+    path = tmp_path / "state.db"
+    db = make_db(path, "gw-0", "seed")
+    require_wal(db)
+    sentinel = _wal_only_sentinel(db, "gw-0")
+    sidecar_identity = dict(db._db_sidecar_identity)
+    main_identity = db._db_file_identity
+    lose_sidecars(path, rename=False)
+    os.unlink(path)
+
+    artifact = capture_retired_wal_generation(
+        path, sidecar_identity=sidecar_identity, trigger="test", main_identity=main_identity,
+    )
+    manifest = _manifest(artifact)
+    assert manifest["main"]["mode"] == "copied"
+    assert manifest["main"]["identity"] == list(main_identity)
+    assert (artifact / "state.db").stat().st_size == manifest["main"]["bytes"]
+    recovered = _recover(artifact, "state.db", tmp_path / "recovered")
+    try:
+        assert _count(recovered, sentinel) == 1
+        assert integrity_ok_conn(recovered)
+    finally:
+        recovered.close()
+    db.close()
+
+
+@not_windows
+def test_capture_keeps_the_wal_when_no_main_image_is_reachable(tmp_path, force_wal):
+    """Nothing to read the main file through: keep the WAL (the part that cannot be rebuilt) and say
+    so in the manifest, instead of discarding both."""
+    path = tmp_path / "state.db"
+    db = make_db(path, "gw-0", "seed")
+    require_wal(db)
+    _wal_only_sentinel(db, "gw-0")
+    sidecar_identity = dict(db._db_sidecar_identity)
+    identity = sidecar_identity["-wal"]
+    lose_sidecars(path, rename=False)
+    original = _descriptor_contents(_descriptor_for(identity))
+    os.unlink(path)
+
+    artifact = capture_retired_wal_generation(path, sidecar_identity=sidecar_identity, trigger="test")
+    manifest = _manifest(artifact)
+    assert manifest["main"]["mode"] == "missing" and not manifest["main"]["header"]["valid"]
+    assert "unlinked inode is the only copy" in manifest["main"]["note"]
+    assert (artifact / "state.db-wal").read_bytes() == original
+    db.close()
+
+
 # ── Recoverable after the writer process has exited ──────────────────────────────────────────────────
 #
 # The gateway writer A runs in its OWN process, seeds + checkpoints history, leaves rows only in its WAL

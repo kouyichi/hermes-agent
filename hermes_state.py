@@ -1309,6 +1309,7 @@ class SessionDB(
                 return self._retired_generation_capture
             artifact = capture_retired_wal_generation(
                 self.db_path, sidecar_identity=dict(self._db_sidecar_identity or {}), trigger=trigger,
+                main_identity=self._db_file_identity,
             )
             self._retired_generation_capture = artifact
         logger.warning(

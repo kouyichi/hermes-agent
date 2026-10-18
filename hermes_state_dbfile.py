@@ -21,6 +21,7 @@ import struct
 import sys
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -511,8 +512,53 @@ def _parse_sqlite_header(header: bytes) -> dict[str, Any]:
     return {"valid": True, "page_size": 65536 if raw_page_size == 1 else raw_page_size, **parsed}
 
 
+def _capture_main_image(db_path: Path, staging: Path, main_identity) -> dict[str, Any]:
+    """Main-image half of a retired-generation capture: the path first, then the opened inode.
+
+    #140275: when the database file itself is unlinked under a live writer, the path names nothing while
+    this process still holds the opened inode. The captured WAL frames are unreadable without that main
+    image, and the documented remediation (stop every process) releases the only copy, so pread it from
+    the descriptor for the RECORDED identity — never by pathname, which cannot tell a sibling's file
+    from ours. With neither, still capture the WAL (the part that cannot be rebuilt) and record
+    ``mode="missing"`` so the manifest note names the manual copy-out.
+    """
+    dest = staging / db_path.name
+    header = _pread_db_range(db_path, 0, _SQLITE_HEADER_BYTES)
+    if header is not None:
+        size = os.stat(db_path).st_size
+        identity = list(_stat_db_file_identity(db_path) or ()) or None
+        source, copy = "path", partial(_copy_main_image, db_path, dest)
+    else:
+        fd = _own_descriptor_for_identity(main_identity) if main_identity else None
+        size = 0
+        try:
+            if fd is not None:
+                size, header = os.fstat(fd).st_size, os.pread(fd, _SQLITE_HEADER_BYTES, 0)
+        except OSError:
+            fd = None
+        if fd is None or header is None:
+            return {
+                "mode": "missing", "identity": list(main_identity or ()) or None, "size": None,
+                "header": {"valid": False},
+                "note": ("The database file itself is gone from this path, so only the WAL was "
+                         "captured. Those frames cannot be replayed without their main image: copy it "
+                         "out of the holder's `/proc/<pid>/fd` — the unlinked inode is the only copy — "
+                         "before stopping that process."),
+            }
+        identity, source, copy = list(main_identity), "descriptor", partial(_copy_descriptor, fd, dest)
+    main: dict[str, Any] = {"identity": identity, "size": size,
+                            "header": _parse_sqlite_header(header), "source": source}
+    if size > RETIRED_GENERATION_MAIN_IMAGE_MAX_BYTES:
+        header_file = staging / (db_path.name + ".header")
+        header_file.write_bytes(header)
+        _fsync_path(header_file)
+        return {**main, "mode": "header_only", "file": header_file.name, "bytes": len(header)}
+    return {**main, "mode": "copied", **copy(size=size)}
+
+
 def capture_retired_wal_generation(
     db_path, *, sidecar_identity: dict[str, tuple], trigger: str,
+    main_identity: Optional[tuple] = None,
 ) -> Path:
     """Durably capture the lost WAL generation this process still holds open; return the artifact dir.
 
@@ -522,6 +568,13 @@ def capture_retired_wal_generation(
     path at capture time. Nothing is merged: whether those frames belong on top of the main file is
     the operator's decision. Raises :class:`RetiredGenerationCaptureError` when the exact generation
     cannot be located or written; no descriptor is ever closed, moved or truncated.
+
+    ``main_identity`` is the ``(st_dev, st_ino)`` of the main file the caller opened. When the path no
+    longer names it (the database file itself was unlinked under a live writer, #140275) the main image
+    is pread from this process's own descriptor for that exact inode — never by pathname — because the
+    WAL frames are unreadable without it and the documented remediation (stop every process) releases
+    it. With neither a path nor a reachable descriptor the WAL is still captured and the manifest
+    records ``main.mode == "missing"`` so its note can name the manual step.
     """
     db_path = Path(db_path)
     wal_identity = tuple(sidecar_identity.get("-wal") or ())
@@ -570,20 +623,7 @@ def capture_retired_wal_generation(
             with contextlib.suppress(OSError):  # SQLite rebuilds the index; the WAL is what matters
                 manifest["shm"] = {"identity": list(shm_identity), **_copy_descriptor(
                     shm_fd, staging / (db_path.name + "-shm"), size=os.fstat(shm_fd).st_size)}
-        header = _pread_db_range(db_path, 0, _SQLITE_HEADER_BYTES)
-        if header is None:
-            raise RetiredGenerationCaptureError(f"cannot read the main image header of {db_path}")
-        main_size = os.stat(db_path).st_size
-        main: dict[str, Any] = {"identity": list(_stat_db_file_identity(db_path) or ()) or None,
-                                "size": main_size, "header": _parse_sqlite_header(header)}
-        if main_size <= RETIRED_GENERATION_MAIN_IMAGE_MAX_BYTES:
-            main.update(mode="copied", **_copy_main_image(db_path, staging / db_path.name, size=main_size))
-        else:
-            header_file = staging / (db_path.name + ".header")
-            header_file.write_bytes(header)
-            _fsync_path(header_file)
-            main.update(mode="header_only", file=header_file.name, bytes=len(header))
-        manifest["main"] = main
+        manifest["main"] = _capture_main_image(db_path, staging, main_identity)
         # Late import: utils pulls agent-side deps; the capture must stay dependency-light.
         from utils import atomic_json_write
         atomic_json_write(staging / RETIRED_GENERATION_MANIFEST, manifest, sort_keys=True)
