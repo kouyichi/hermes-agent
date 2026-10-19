@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.urllib_security import open_credentialed_url
 from hermes_cli.version_info import get_version_info
+from hermes_cli.models_config_providers import declared_provider_models
 from hermes_cli.models_catalog_static import (
     CuratedFallbackModels,
     CANONICAL_PROVIDERS,
@@ -1813,9 +1814,8 @@ def _static_catalog(normalized: str, fetcher: Any) -> list[str]:
     # _PROVIDER_MODELS entry fall back to the profile's curated fallback_models so their agentic picks lead
     # the picker instead of whatever the live catalog happens to return first (e.g. Fireworks lists an image
     # model, flux-*, ahead of its chat models).
-    # A provider with a live fetcher that declined is serving a placeholder; one without any live
-    # source is serving its authoritative catalog.
-    curated_static = (CuratedFallbackModels if fetcher is not None else list)(_PROVIDER_MODELS.get(normalized, []))
+    # A provider with a live fetcher that declined is serving a placeholder; one without any live source serves its authoritative catalog (a `providers:`-declared one: declared_provider_models).
+    curated_static = (CuratedFallbackModels if fetcher is not None else list)(_PROVIDER_MODELS.get(normalized, []) or declared_provider_models(normalized) or [])
     if normalized not in _MODELS_DEV_PREFERRED:
         return _chat_catalog_rows(_drop_delisted_opencode_models(normalized, curated_static))
     # models.dev keeps listing retired Zen ids too: filter after the merge, not before.
