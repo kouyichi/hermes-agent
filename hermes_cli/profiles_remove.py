@@ -1,4 +1,9 @@
-"""Profile directory removal: wait out the live owner, then rmtree with a short retry."""
+"""Profile directory removal: wait out the live owner, then rmtree with a short retry.
+
+It also owns what the ``profiles/.deleted`` tombstone means after a FAILED removal: a surviving
+populated profile is restored (tombstone cleared) instead of becoming invisible, and the error text
+names the state so recovery needs no source read.
+"""
 from __future__ import annotations
 
 import contextlib
@@ -64,6 +69,58 @@ def _rmtree_make_writable(func, path, exc):
             with contextlib.suppress(OSError):
                 os.chmod(target, os.stat(target).st_mode | stat.S_IWUSR)
     func(path)
+
+
+def failed_removal_error(profile_name: str, profile_dir: Path, cause: BaseException) -> RuntimeError:
+    """The delete error for a tree ``rmtree`` could not remove, and the tombstone's new meaning.
+
+    ``delete_profile`` tombstones before removing (a stale serve/logging ``mkdir`` must not relist
+    the name), so a removal that fails would otherwise leave the directory **unreachable and
+    invisible**: ``profile_exists()`` answers False, ``profile list`` omits it, ``-p <name>``
+    refuses it, and the error text suggests ``profile create <name>`` to recreate it — against
+    data that is still on disk. A profile that kept its identity is still deletable, so clear its
+    tombstone and let the name resolve again; only a marker-less shell stays tombstoned.
+    """
+    from hermes_constants import (
+        clear_named_profile_deleted, named_profile_has_identity, profile_tombstone_path,
+    )
+    if named_profile_has_identity(profile_dir):
+        clear_named_profile_deleted(profile_dir)
+        # A live multiplexer unroutes a tombstoned name immediately; ask it to rescan so the
+        # restored profile is served again now instead of at its next periodic pass.
+        with contextlib.suppress(Exception):
+            from hermes_cli.gateway_multiplex_served import notify_multiplexer_profiles_changed
+            notify_multiplexer_profiles_changed(profile_name)
+        return RuntimeError(
+            f"Could not remove profile directory {profile_dir}: {cause}. "
+            f"The profile was left intact and is listed again; retry the delete with: "
+            f"hermes profile delete {profile_name}"
+        )
+    return RuntimeError(
+        f"Could not remove profile directory {profile_dir}: {cause}. What is left carries no "
+        f"profile identity, so it stays tombstoned ({profile_tombstone_path(profile_dir)}); "
+        f"`hermes profile create {profile_name}` can reclaim it."
+    )
+
+
+def missing_profile_error(profile_name: str, profile_dir: Path) -> FileNotFoundError:
+    """``profile_dir`` resolves to no LIVE profile: say which of the two states it is.
+
+    Absent (never created, or deleted and removed) keeps the old "create it" advice. A tombstoned
+    directory that is still populated is an *unfinished* delete, so name it and the tombstone
+    instead — telling the operator to ``profile create`` there would overwrite real user data.
+    """
+    from hermes_constants import named_profile_has_identity, named_profile_is_deleted, profile_tombstone_path
+    if named_profile_is_deleted(profile_dir) and named_profile_has_identity(profile_dir):
+        return FileNotFoundError(
+            f"Profile '{profile_name}' is marked deleted but its directory is still there: "
+            f"{profile_dir}. Its deletion did not finish — remove the tombstone "
+            f"{profile_tombstone_path(profile_dir)} to recover it, then retry: "
+            f"hermes profile delete {profile_name}"
+        )
+    return FileNotFoundError(
+        f"Profile '{profile_name}' does not exist. Create it with: hermes profile create {profile_name}"
+    )
 
 
 def _rmtree_with_retry(profile_dir: Path, onexc_handler) -> None:
