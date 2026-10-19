@@ -22,15 +22,64 @@ def inherit_creator_origin(
     _inherit_notify_subs(conn, task_id, (creator_task_id,), created_at=created_at)
 
 
+def validate_initial_block_kind(initial_status: str, initial_block_kind: Optional[str]) -> Optional[str]:
+    """Check the create-time park contract; returns the kind (``None`` = untyped park, today's default).
+
+    A kind without ``initial_status="blocked"`` is refused rather than dropped: the caller asked for
+    a typed park, and a silently untyped card is the defect ``initial_block_kind`` exists to close.
+    """
+    if initial_block_kind is None:
+        return None
+    from hermes_cli.kanban_db import VALID_BLOCK_KINDS
+
+    allowed = sorted(VALID_BLOCK_KINDS - {"dependency"})
+    if initial_status != "blocked":
+        raise ValueError("initial_block_kind requires initial_status='blocked'")
+    if initial_block_kind not in allowed:
+        raise ValueError(f"initial_block_kind must be one of {allowed} or None")
+    return initial_block_kind
+
+
+def record_initial_block(
+    conn: sqlite3.Connection, task_id: str, *,
+    initial_status: str, initial_block_kind: Optional[str], actor: Optional[str],
+) -> None:
+    """Park a just-created card ``blocked`` and, when asked, type the park.
+
+    ``initial_status="blocked"`` used to write no ``block_kind``, so a card parked for human ops
+    read as untyped to every consumer that keys on the kind (needs_input queues, notifier wording,
+    the block-recurrence accounting), and the one repair — ``block_task(kind=...)`` — is refused to
+    a dispatcher-owned worker on a card that is not its own (#141271). This writes the same end
+    state that repair reaches (``block_kind`` plus ``block_recurrences = 1``) in the creating
+    transaction, so the card never exists untyped for a reader.
+
+    ``dependency`` is refused on purpose: that kind only ever waits on incomplete parents, and a
+    card parked ``blocked`` with it skips ``_route_block``'s re-kind, so ``recompute_ready`` could
+    promote it context-free — the sticky-block bug ``block_task`` guards against.
+    """
+    from hermes_cli.kanban_db import _append_event
+
+    payload: dict[str, Any] = {"reason": "initial_status", "status": "blocked", "actor": actor or "user"}
+    if validate_initial_block_kind(initial_status, initial_block_kind) is not None:
+        conn.execute(
+            "UPDATE tasks SET block_kind = ?, block_recurrences = 1 WHERE id = ?",
+            (initial_block_kind, task_id),
+        )
+        payload["kind"] = initial_block_kind
+    _append_event(conn, task_id, "blocked", payload)
+
+
 def initial_task_state(
     conn: sqlite3.Connection, parents: tuple[str, ...], initial_status: str,
-    triage: bool, tenant: Optional[str],
+    triage: bool, tenant: Optional[str], initial_block_kind: Optional[str] = None,
 ) -> tuple[str, Optional[str]]:
     """Resolve state and tenant under the creator's write transaction.
 
     Parent order breaks ties in this soft namespace; explicit tenant wins.
-    Validate parents even for parked tasks so links never dangle.
+    Validate parents even for parked tasks so links never dangle. The park kind is validated
+    here, before the insert, so an impossible park leaves no card to roll back.
     """
+    validate_initial_block_kind(initial_status, initial_block_kind)
     rows = {}
     if parents:
         rows = {row["id"]: row for row in conn.execute(

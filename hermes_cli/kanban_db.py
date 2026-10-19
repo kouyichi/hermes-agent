@@ -1183,6 +1183,7 @@ def create_task(
     max_retries: Optional[int] = None, model_override: Optional[str] = None,
     provider_override: Optional[str] = None, reasoning_effort: Optional[str] = None,
     goal_mode: bool = False, goal_max_turns: Optional[int] = None, initial_status: str = "running",
+    initial_block_kind: Optional[str] = None,
     session_id: Optional[str] = None, board: Optional[str] = None, project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
@@ -1191,8 +1192,9 @@ def create_task(
     """Create a task (optionally under ``parents``); returns its id.
 
     Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
-    forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
-    ``idempotency_key``: an existing non-archived task with the key is returned
+    forces ``triage``; ``initial_status="blocked"`` parks it for human ops, and
+    ``initial_block_kind`` (with it) types that park like ``block_task(kind=...)`` — see
+    ``record_initial_block``. ``idempotency_key``: an existing non-archived task with the key is returned
     instead of a duplicate. ``max_runtime_seconds``: cap before the dispatcher
     SIGTERMs and re-queues. ``model_override``/``provider_override`` pin the
     worker model (provider requires model); ``reasoning_effort`` is independent.
@@ -1203,7 +1205,7 @@ def create_task(
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
-    from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
+    from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin, record_initial_block
     from hermes_cli.kanban_pr_acceptance import validate_contract
 
     completion_contract = validate_contract(completion_contract)
@@ -1268,7 +1270,8 @@ def create_task(
             # allow_nested: graph builders compose create_task under one outer
             # commit so the dispatcher never sees a half-built graph.
             with write_txn(conn, allow_nested=True):
-                task_status, tenant = initial_task_state(conn, parents, initial_status, triage, tenant)
+                task_status, tenant = initial_task_state(
+                    conn, parents, initial_status, triage, tenant, initial_block_kind)
                 # Project worktree: fresh dir under the repo + deterministic
                 # branch, instead of the random ``wt/<id>`` worker fallback.
                 if project_obj is not None and workspace_kind == "worktree":
@@ -1322,12 +1325,9 @@ def create_task(
                     },
                 )
                 if task_status == "blocked":
-                    _append_event(
-                        conn,
-                        task_id,
-                        "blocked",
-                        {"reason": "initial_status", "status": "blocked", "actor": created_by or "user"},
-                    )
+                    record_initial_block(
+                        conn, task_id, initial_status=initial_status,
+                        initial_block_kind=initial_block_kind, actor=created_by)
                 if task_status == "todo":
                     # Parked behind an open parent: record why, exactly as
                     # link_tasks does, so the board never shows an unexplained todo.

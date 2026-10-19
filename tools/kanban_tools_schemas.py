@@ -478,6 +478,17 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "'running', which preserves the usual dispatch path."
             ),
         },
+        "initial_block_kind": {
+            "type": "string",
+            "enum": ["needs_input", "capability", "transient"],
+            "description": (
+                "Type the park that 'initial_status: blocked' creates, "
+                "so the card lands in the needs_input queues and the "
+                "block accounting as typed. Requires 'initial_status: "
+                "blocked'; 'dependency' is refused (it only waits on "
+                "incomplete parents — pass a parent instead)."
+            ),
+        },
         "skills": {
             "type": "array",
             "items": {"type": "string"},

@@ -217,6 +217,12 @@ _SPECS = [
              help="Initial card status. Use 'blocked' for cards "
                   "that require immediate human ops (R3 gate) "
                   "to skip the brief running-to-blocked transition."),
+        _arg("--initial-block-kind", choices=sorted(kb.VALID_BLOCK_KINDS - {"dependency"}),
+             default=None,
+             help="Type the park --initial-status blocked creates (needs_input, "
+                  "capability, transient), so the card lands in the needs_input "
+                  "queues and the block accounting as typed. 'dependency' is "
+                  "refused: pass a parent instead."),
         _json_flag(help="Emit JSON output"),
     ], help="Create a new task"),
     _cmd("swarm", [
