@@ -759,3 +759,53 @@ def test_projects_without_a_profile_stay_on_the_launch_home(monkeypatch, tmp_pat
     assert not (Path(os.environ["HERMES_HOME"]) / "projects.db").exists()
 
 
+
+
+def _seed_source_session(home: Path, session_id: str, source: str, cwd: str | None = None) -> None:
+    """Seed one message-bearing session with an explicit ``source``."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=home / "state.db")
+    try:
+        db.create_session(session_id, source, cwd=cwd)
+        db.append_message(session_id, "user", f"hello from {session_id}")
+    finally:
+        db.close()
+
+
+def test_projects_tree_keeps_messaging_sessions_out_of_the_home_bucket(monkeypatch, tmp_path):
+    """A Telegram/Slack row must not also appear as a local chat under Projects → Home.
+
+    Platform adapters record no workspace ``cwd``, so ``build_tree`` filed every messaging row
+    into the synthetic Home bucket while the desktop rendered the same row in its own Messaging
+    section (its flat Recents already excludes those sources). The tree is the only surface that
+    re-listed them, so it must exclude the platform sources too.
+    """
+    home = _profile_dir(tmp_path, "default")
+    _bind_profiles(monkeypatch, tmp_path, {"default": home})
+    repo = tmp_path / "repos" / "desk-workspace"
+    repo.mkdir(parents=True)
+    project = _create_project(home, "Workspace", repo, use=True)
+    _seed_source_session(home, "desk-chat", "desktop", cwd=str(repo))
+    _seed_source_session(home, "tg-dm", "telegram")
+    _seed_source_session(home, "slack-dm", "slack")
+
+    with _serving_launch_profile(home):
+        tree = _call("projects.tree")
+
+    assert [p["id"] for p in tree["projects"]] == [project["id"]]
+    assert tree["scoped_session_ids"] == ["desk-chat"]
+    previewed = [s["id"] for p in tree["projects"] for s in p["previewSessions"]]
+    assert previewed == ["desk-chat"]
+
+
+def test_messaging_session_sources_mirror_the_platform_enum():
+    """The literal in ``methods_projects`` must track ``gateway.config.Platform``.
+
+    A new built-in adapter added to the enum is a messaging source; the tree's deny-list has to
+    grow with it (the runtime plugin registry covers the lazily-registered plugin adapters).
+    """
+    from gateway.config import _BUILTIN_PLATFORM_VALUES
+    from tui_gateway.methods_projects import _MESSAGING_SESSION_SOURCES
+
+    assert set(_MESSAGING_SESSION_SOURCES) == set(_BUILTIN_PLATFORM_VALUES) - {"local"}

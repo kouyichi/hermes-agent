@@ -3,6 +3,8 @@ Bodies are rebound onto server.py's globals at install (method_ctx.bind_module).
 
 from __future__ import annotations
 
+import contextlib
+
 from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
@@ -320,6 +322,28 @@ def _discover_repos_payload(
 # Not user conversations; subagent/compression children are dropped by include_children=False.
 _PROJECT_TREE_EXCLUDED_SOURCES = ["cron", "kanban", "oneshot"]
 
+# Messaging-platform session sources: every ``gateway.config.Platform`` member but ``local``.
+# Such a row carries no workspace ``cwd``, so ``build_tree`` filed it under the synthetic Home
+# bucket as well as its own Messaging section (the desktop's flat Recents already keeps these
+# out — ``MESSAGING_SESSION_SOURCE_IDS`` in apps/desktop/src/lib/session-source.ts).
+_MESSAGING_SESSION_SOURCES = (
+    "api_server", "bluebubbles", "dingtalk", "discord", "email", "feishu", "matrix",
+    "mattermost", "msgraph_webhook", "qqbot", "relay", "signal", "slack", "sms", "telegram",
+    "webhook", "wecom", "wecom_callback", "weixin", "whatsapp", "whatsapp_cloud", "yuanbao")
+
+
+def _project_tree_excluded_sources() -> list[str]:
+    """The tree's never-listed sources: internal runs, plus messaging platforms.
+
+    Plugin adapters (``irc``, ``photon``, ``a2a``, …) register lazily, so the registry's known
+    names are the only way to cover them without importing every adapter.
+    """
+    sources = [*_PROJECT_TREE_EXCLUDED_SOURCES, *_MESSAGING_SESSION_SOURCES]
+    with contextlib.suppress(Exception):
+        from gateway.platform_registry import platform_registry
+        sources.extend(n for n in sorted(platform_registry.registered_names()) if n not in sources)
+    return sources
+
 
 def _project_tree_row(r: dict) -> dict:
     """Project a SessionDB row to the minimal shape the sidebar renders (grouping fields +
@@ -347,7 +371,7 @@ def _project_tree_inputs(
     # compact_rows: selecting the system-prompt blob only to drop it costs tens of MB of reads.
     rows = db.list_sessions_rich(
         limit=session_limit, offset=0, order_by_last_active=True, min_message_count=1,
-        include_children=False, exclude_sources=_PROJECT_TREE_EXCLUDED_SOURCES,
+        include_children=False, exclude_sources=_project_tree_excluded_sources(),
         include_archived=False, compact_rows=True)
     sessions = [_project_tree_row(r) for r in rows]
     # Parallel-warm the git cache so build_tree's resolver doesn't cold-probe each cwd in turn.
