@@ -35,6 +35,7 @@ from agent.message_metadata import MERGED_TURN_PREFIX
 from agent.turn_context import drop_stale_api_content
 from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
 from agent.primary_runtime_snapshot import _build_primary_runtime_snapshot
+from agent.request_dumps import api_error_debug_info, request_dumps_enabled
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
 logger = logging.getLogger(__name__)
 
@@ -1539,26 +1540,14 @@ def extract_reasoning(agent, assistant_message) -> Optional[str]:
     return "\n\n".join(parts) if parts else None
 
 
-def _api_error_debug_info(error: Exception) -> dict[str, Any]:
-    info: dict[str, Any] = {"type": type(error).__name__, "message": str(error)}
-    info.update({
-        k: v for k in ("status_code", "request_id", "code", "param", "type", "body")
-        if (v := getattr(error, k, None)) is not None
-    })
-    response_obj = getattr(error, "response", None)
-    if response_obj is not None:
-        try:
-            info["response_status"] = getattr(response_obj, "status_code", None)
-            info["response_text"] = response_obj.text
-        except Exception as e:
-            _ra().logger.debug("Could not extract error response details: %s", e)
-    return info
-
-
 def dump_api_request_debug(
     agent, api_kwargs: dict[str, Any], *, reason: str, error: Optional[Exception] = None
 ) -> Optional[Path]:
-    """Dump the request body from api_kwargs (minus transport keys) for debugging provider 4xx failures."""
+    """Dump the request body (minus transport keys) on provider 4xx failures; a no-op when
+    ``logging.request_dumps`` is false."""
+    if not request_dumps_enabled():
+        logger.debug("Request debug dump skipped: logging.request_dumps is false (reason=%s)", reason)
+        return None
     try:
         body = {k: v for k, v in copy.deepcopy(api_kwargs).items() if v is not None and k != "timeout"}
         api_key = None
@@ -1585,7 +1574,7 @@ def dump_api_request_debug(
             },
         }
         if error is not None:
-            dump_payload["error"] = _api_error_debug_info(error)
+            dump_payload["error"] = api_error_debug_info(error)
         # Sanitize the session ID (may come from an untrusted X-Hermes-Session-Id header) so a
         # "../"-shaped ID cannot write outside logs_dir.
         from agent.session_persistence import _safe_session_filename_component

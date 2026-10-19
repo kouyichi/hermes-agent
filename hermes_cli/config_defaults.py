@@ -2045,9 +2045,9 @@ DEFAULT_CONFIG = {
         "connectors": {"enabled": True},
     },
     "logging": {  # File logging to ~/.hermes/logs/: agent.log captures INFO+, errors.log WARNING+.
-        "level": "INFO",       # minimum level for agent.log: DEBUG, INFO, WARNING
-        "max_size_mb": 5,      # max size per log file before rotation
-        "backup_count": 3,     # rotated backups to keep
+        # level/max_size_mb/backup_count: agent.log's minimum level and size-based rotation.
+        # request_dumps: also write each hard provider-error request body (prompt included) to sessions/.
+        "level": "INFO", "max_size_mb": 5, "backup_count": 3, "request_dumps": True,
     },
     # Remote model-catalog manifest: curated OpenRouter / Nous Portal model lists fetched from this
     # URL (falls back to the in-repo snapshot on network failure), so picker lists update without a
