@@ -19,6 +19,7 @@ import os
 import json
 import time
 from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 from pathlib import Path
 
 yaml = YAML(typ="safe", pure=True)
@@ -325,22 +326,54 @@ def _detect_model_family(model: str) -> str:
     return "unknown"
 
 
-def _get_current_model() -> tuple:
-    """Read current model and provider from Hermes config.yaml.
-    Returns (model_str, base_url)."""
+def _read_model_config() -> tuple:
+    """Read the configured model from ``config.yaml`` as ``(model, base_url, problem)``.
+
+    ``problem`` is non-empty only when the FILE could not be read or parsed, so an
+    unreadable config.yaml is reported as such instead of as "no model configured".
+
+    Accepted spellings, in precedence order: a mapping's legacy ``model.name``, the
+    current schema's ``model.default``, and a bare string ``model:``.
+    """
+    default_base = "https://openrouter.ai/api/v1"
     if not CONFIG_PATH.exists():
-        return None, None
+        return "", default_base, f"{CONFIG_PATH} does not exist"
     try:
         with open(CONFIG_PATH) as f:
             cfg = yaml.load(f) or {}
-        model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, str):
-            return model_cfg, "https://openrouter.ai/api/v1"
-        model_name = model_cfg.get("name", "")
-        base_url = model_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        return model_name, base_url
-    except Exception:
+    except (OSError, ValueError, YAMLError) as exc:
+        # Unreadable/undecodable/invalid YAML: reported to the caller, which names the file
+        # in its error instead of failing the run with a traceback.
+        return "", default_base, f"{CONFIG_PATH} could not be read: {exc}"
+    if not isinstance(cfg, dict):
+        return "", default_base, f"{CONFIG_PATH} could not be read: top level is not a mapping"
+    model_cfg = cfg.get("model", "")
+    if isinstance(model_cfg, str):
+        return model_cfg.strip(), default_base, ""
+    if not isinstance(model_cfg, dict):
+        return "", default_base, f"model: in {CONFIG_PATH} is neither a name nor a mapping"
+    model_name = str(model_cfg.get("name") or model_cfg.get("default") or "").strip()
+    return model_name, str(model_cfg.get("base_url") or default_base), ""
+
+
+def _model_detection_error(config_problem: str) -> str:
+    """Why no model could be detected: an unreadable config.yaml, or one without a model.
+
+    Separate messages on purpose — the first needs a file fix, the second a model choice.
+    """
+    if config_problem:
+        return f"Could not read the model from config.yaml: {config_problem}"
+    return ("No model specified: config.yaml has no model.default (or legacy model.name). "
+            "Pass model=... or set one with /model.")
+
+
+def _get_current_model() -> tuple:
+    """Read current model and provider from Hermes config.yaml.
+    Returns (model_str, base_url)."""
+    model_name, base_url, problem = _read_model_config()
+    if problem:
         return None, None
+    return model_name or None, base_url
 
 
 def _get_api_key(base_url: str | None = None) -> str:
@@ -449,12 +482,13 @@ def auto_jailbreak(model=None, base_url=None, api_key=None,
         return {"success": False, "error": "openai package not installed"}
 
     # 1. Detect model
+    config_problem = ""
     if not model:
-        model, base_url_detected = _get_current_model()
+        model, base_url_detected, config_problem = _read_model_config()
         if not base_url:
             base_url = base_url_detected
     if not model:
-        return {"success": False, "error": "No model specified and couldn't read config.yaml"}
+        return {"success": False, "error": _model_detection_error(config_problem)}
     if not base_url:
         base_url = "https://openrouter.ai/api/v1"
     if not api_key:
