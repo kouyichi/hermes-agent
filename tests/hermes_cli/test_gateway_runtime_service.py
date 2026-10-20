@@ -550,3 +550,92 @@ def test_task_discovery_reads_localized_schtasks_output(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_run", run)
     found = service.discover_existing_gateway_service(home, deadline=time.monotonic() + 5)
     assert found is not None and found.start_argv == ("schtasks.exe", "/Run", "/TN", name)
+
+
+# schtasks interleaves one plain-text diagnostic per TaskCache entry whose definition file is gone
+# (leftovers from long-removed software). csv.reader turns each into a one-field row.
+_SCHTASKS_ORPHANED = "错误: 无法加载任务: ASUS Media Streamer DMR\r\n"
+
+
+def _schtasks_probe(monkeypatch, service, gateway_windows, listing: str):
+    """Point the Windows probe at *listing* bytes written in the console code page, as a real host does.
+
+    Calls ``_windows`` directly rather than through ``discover_existing_gateway_service``: the
+    dispatch is a plain ``sys.platform`` lookup, and patching ``sys.platform`` makes every lazily
+    imported win32-only module (``msvcrt`` in gateway/status.py) fail to import on this host.
+    """
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(gateway_windows, "_windows_console_encodings", lambda: ["cp936"])
+    data = listing.encode("cp936")
+
+    def run(argv, *_args, encoding=None, **_kwargs):
+        assert argv[0] == "schtasks.exe", argv
+        return SimpleNamespace(returncode=0, stdout=data if not encoding else data.decode(encoding))
+
+    monkeypatch.setattr(service, "_run", run)
+
+
+def test_task_discovery_ignores_diagnostics_about_orphaned_tasks(tmp_path, monkeypatch):
+    """A Windows install carrying orphaned TaskCache entries must still cold-start (#142140).
+
+    ``schtasks /Query /FO CSV`` answers with real task rows AND plain-text diagnostics for entries
+    whose definition file is gone; the probe's "every row has three columns" guard read those
+    diagnostics as a whole-probe failure and raised ``service_state_unknown``, which is a boot loop
+    (ensure only asks on a cold start, so a running gateway hides it). A real task row is always
+    three columns, and a missing row already means the documented Startup-folder/unmanaged path, so
+    skipping a diagnostic can only cause a fallback."""
+    from hermes_cli import gateway_runtime_service as service, gateway_windows
+
+    home = tmp_path / "profile"
+    home.mkdir()
+    _schtasks_probe(monkeypatch, service, gateway_windows, listing=(
+        _SCHTASKS_ORPHANED
+        + '"\\Microsoft\\Windows\\Defrag\\ScheduledDefrag","2026-10-21 01:00:00","就绪"\r\n'
+        + "错误: 无法加载任务: i-Setup014927\r\n"
+    ))
+    assert service._windows(home, time.monotonic() + 5) is None
+
+
+def test_task_discovery_answers_uninstalled_when_every_entry_is_an_orphan(tmp_path, monkeypatch):
+    """Diagnostics carry no field at all, so a host whose whole listing is orphaned entries has no
+    listable task — the same answer as an empty listing, not an unknown state. Refusing here would
+    re-create the #142140 boot loop on exactly the machines that report the most diagnostics."""
+    from hermes_cli import gateway_runtime_service as service, gateway_windows
+
+    home = tmp_path / "profile"
+    home.mkdir()
+    _schtasks_probe(monkeypatch, service, gateway_windows,
+                    listing=_SCHTASKS_ORPHANED + "错误: 无法加载任务: i-Setup014927\r\n")
+    assert service._windows(home, time.monotonic() + 5) is None
+
+
+def test_task_discovery_still_finds_the_task_beside_orphaned_diagnostics(tmp_path, monkeypatch):
+    """Skipping diagnostics must not skip the row that matters: an installed Hermes task found
+    between two orphaned entries is still verified and started through its own verb."""
+    from types import SimpleNamespace
+    from hermes_cli import gateway_runtime_service as service, gateway_windows
+    from hermes_cli.gateway_windows import _build_scheduled_task_xml
+
+    home = tmp_path / "profile"
+    home.mkdir()
+    script = _installed_vbs(home, str(home))
+    name = "Hermes_Gateway_" + service.service_suffix(home)
+    account, sid = "DESKTOP-1\\方舟", "S-1-5-21-123"
+    exports = _as_schtasks_exports(_build_scheduled_task_xml(name, script, account))
+    out = {
+        "whoami.exe": f'"{account}","{sid}"\r\n',
+        "/XML": exports,
+        "/FO": (_SCHTASKS_ORPHANED
+                + f'"\\{name}","N/A","就绪"\r\n'
+                + "错误: 无法加载任务: i-Setup014927\r\n"),
+    }
+    monkeypatch.setattr(gateway_windows, "_windows_console_encodings", lambda: ["cp936"])
+
+    def run(argv, *_args, encoding=None, **_kwargs):
+        data = next(text for key, text in out.items() if key in argv).encode("cp936")
+        return SimpleNamespace(returncode=0, stdout=data if not encoding else data.decode(encoding))
+
+    monkeypatch.setattr(service, "_run", run)
+    found = service._windows(home, time.monotonic() + 5)
+    assert found is not None and found.start_argv == ("schtasks.exe", "/Run", "/TN", name)

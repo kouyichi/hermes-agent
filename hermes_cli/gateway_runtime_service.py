@@ -218,6 +218,19 @@ def _launchd(home: Path, deadline: float) -> ExistingService | None:
     return None
 
 
+def _schtasks_task_rows(listing: str) -> list[list[str]]:
+    """The task rows of ``schtasks /Query /FO CSV /NH``, dropping diagnostics interleaved into it.
+
+    For every TaskCache entry whose definition file is gone (leftovers from long-removed software)
+    schtasks writes a plain-text diagnostic -- ``ERROR: Task cannot be loaded: <name>``, localized --
+    into the CSV stream, and ``csv.reader`` turns each into a one-field row. A real task row is always
+    three columns (name, next run, status) and only its quoted name can contain a comma, so width is
+    what separates the two shapes; a diagnostic describes some other entry and says nothing about the
+    task being looked up (#142140).
+    """
+    return [row for row in csv.reader(io.StringIO(listing)) if len(row) == 3]
+
+
 def _windows(home: Path, deadline: float) -> ExistingService | None:
     from hermes_cli.gateway_windows import _decode_schtasks_output
     suffix = service_suffix(home)
@@ -231,10 +244,8 @@ def _windows(home: Path, deadline: float) -> ExistingService | None:
             raise RuntimeStartError(refusal)
         return _decode_schtasks_output(result.stdout or b"")
 
-    rows = list(csv.reader(io.StringIO(query("service_manager_unavailable", "schtasks.exe", "/Query", "/FO", "CSV", "/NH"))))
-    if any(len(row) != 3 for row in rows if row):
-        raise RuntimeStartError("service_state_unknown")
-    if any(row and row[0].lstrip("\\") == name for row in rows):
+    rows = _schtasks_task_rows(query("service_manager_unavailable", "schtasks.exe", "/Query", "/FO", "CSV", "/NH"))
+    if any(row[0].lstrip("\\") == name for row in rows):
         from hermes_cli.gateway_runtime_service_identity import verify_windows_task
         unverified = "service_identity_unverified"
         definition = query(unverified, "schtasks.exe", "/Query", "/TN", name, "/XML")
