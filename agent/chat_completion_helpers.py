@@ -1612,8 +1612,6 @@ def _assistant_tool_call_dict(agent, tool_call, index: int) -> dict:
     tc_dict = {"id": call_id, "call_id": call_id, "response_item_id": response_item_id,
         "type": tool_call.type,
         "function": {"name": tool_call.function.name, "arguments": tool_call.function.arguments}}
-    # Preserve extra_content (Gemini thought_signature) or Gemini 3 thinking
-    # models 400 on the next request.
     # Tool-call arguments are intentionally NOT redacted here. This dict enters the in-memory conversation
     # history that is replayed to the model on every subsequent turn AND persisted to state.db, which is
     # itself replayed verbatim on session resume (get_messages_as_conversation). Masking a credential to
@@ -1626,11 +1624,12 @@ def _assistant_tool_call_dict(agent, tool_call, index: int) -> dict:
     # Storage-time redaction remains governed by the `security.redact_secrets` toggle. (#19798 introduced
     # this; #43083 removed it.) Preserve extra_content (e.g. Gemini thought_signature) so it is sent back on
     # subsequent API calls. Without this, Gemini 3 thinking models reject the request with a 400 error.
+    from agent.reasoning_carriers import SIGNATURE_ROUTE_KEY, field, signature_route
     extra = getattr(tool_call, "extra_content", None)
     if extra is not None:
         tc_dict["extra_content"] = _dump_if_model(extra)
+        tc_dict[SIGNATURE_ROUTE_KEY] = signature_route(getattr(agent, "base_url", None))  # minted here (#141770)
     # Copilot's Gemini 3 variant signs the call inside ``function`` (replayed only to Copilot).
-    from agent.reasoning_carriers import field
     fn_sig = field(tool_call, "thought_signature") or getattr(tool_call.function, "thought_signature", None)
     if isinstance(fn_sig, str) and fn_sig:
         tc_dict["function"]["thought_signature"] = fn_sig
@@ -1730,11 +1729,11 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
 
                         _reset_read_dedup_caches(task_id, session_id=getattr(agent, "session_id", None) or "")
 
-    from agent.reasoning_carriers import carrier_record
-    if record := carrier_record(assistant_message):
-        # Gemini text-turn signature / Copilot reasoning_opaque+text: top-level for the live
-        # history, a private reasoning_details record for persistence (reasoning_carriers.py).
-        msg.update({k: v for k, v in record.items() if k != "type"})
+    from agent.reasoning_carriers import SIGNATURE_ROUTE_KEY, carrier_record, signature_route
+    if record := carrier_record(assistant_message, route=signature_route(getattr(agent, "base_url", None))):
+        # Gemini text-turn signature / Copilot reasoning_opaque+text: top-level for the live history,
+        # a private record for persistence (reasoning_carriers.py); its route stamp is never on the wire.
+        msg.update({k: v for k, v in record.items() if k not in ("type", SIGNATURE_ROUTE_KEY)})
         msg["reasoning_details"] = [*msg.get("reasoning_details", ()), record]
 
     if assistant_tool_calls:

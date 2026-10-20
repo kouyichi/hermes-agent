@@ -19,6 +19,7 @@ from agent.message_metadata import MESSAGE_UID
 from agent.message_sanitization import coalesce_tool_call_id, normalize_finish_reason as _normalize_finish_reason
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
+from agent.reasoning_carriers import SIGNATURE_ROUTE_KEY, signature_route
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
 
@@ -43,7 +44,7 @@ _STRIP_MSG_KEYS = (
     "platform_message_id", "message_id", "api_content", "anthropic_content_blocks", "bedrock_content_blocks",
     MESSAGE_UID,
 )
-_STRIP_TC_KEYS = ("call_id", "response_item_id")
+_STRIP_TC_KEYS = ("call_id", "response_item_id", SIGNATURE_ROUTE_KEY)
 _HIGH_EFFORTS = {"high", "xhigh", "max", "ultra"}
 
 
@@ -439,9 +440,16 @@ def _mistral_tool_id(key: str) -> str:
     return "".join(chars)
 
 
+def _signature_minted_elsewhere(tool_call: dict, wire_route: str) -> bool:
+    """True when this tool call's ``extra_content`` signature belongs to another upstream (#141770)."""
+    minted_at = tool_call.get(SIGNATURE_ROUTE_KEY)
+    return bool(wire_route) and isinstance(minted_at, str) and bool(minted_at) and minted_at != wire_route
+
+
 def _sanitize_message(
     msg: Any, strip_extra_content: bool, strip_reasoning: frozenset = frozenset(),
     native_reasoning_details_type: str | None = None, *, mistral_tool_ids: bool = False,
+    wire_route: str = "",
 ) -> dict | None:
     """Sanitized copy of ``msg``, or None when nothing needs stripping.
 
@@ -498,6 +506,7 @@ def _sanitize_message(
             keys = [k for k in _STRIP_TC_KEYS if k in tc]
             if "extra_content" in tc and (
                 strip_extra_content or not _has_replayable_thought_signature(tc["extra_content"])
+                or _signature_minted_elsewhere(tc, wire_route)
             ):
                 keys.append("extra_content")
             key = coalesce_tool_call_id(tc) if mistral_tool_ids else ""
@@ -539,8 +548,9 @@ class ChatCompletionsTransport(ProviderTransport):
             carriers = carriers | {"reasoning_details"}
         strip_reasoning = frozenset({"reasoning_content", "reasoning", "reasoning_details"}) - carriers
         mistral_ids = _route_requires_mistral_tool_ids(provider, kwargs.get("model"), kwargs.get("base_url"))
+        wire_route = signature_route(kwargs.get("base_url"))
         sanitized_pairs = [(m, _sanitize_message(m, strip_extra_content, strip_reasoning, native_type,
-                                                 mistral_tool_ids=mistral_ids))
+                                                 mistral_tool_ids=mistral_ids, wire_route=wire_route))
                            for m in messages]
         if all(s is None for _, s in sanitized_pairs):
             return messages

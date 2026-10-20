@@ -229,8 +229,9 @@ class ReasoningParamsMixin:
         if not isinstance(tool_calls, list):
             return api_msg
         from agent.transports.chat_completions import _model_consumes_thought_signature
+        from agent.reasoning_carriers import SIGNATURE_ROUTE_KEY
         keep_signature = _model_consumes_thought_signature(model, base_url, provider)
-        strip = {"call_id", "response_item_id"} | (set() if keep_signature else {"extra_content"})
+        strip = {"call_id", "response_item_id", SIGNATURE_ROUTE_KEY} | (set() if keep_signature else {"extra_content"})
         api_msg["tool_calls"] = [{k: v for k, v in tc.items() if k not in strip} if isinstance(tc, dict) else tc
                                  for tc in tool_calls]
         return api_msg

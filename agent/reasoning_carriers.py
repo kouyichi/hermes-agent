@@ -19,6 +19,24 @@ from typing import Any, Optional
 CARRIER_TYPE = "hermes.native_assistant"
 _MESSAGE_KEYS = ("extra_content", "reasoning_opaque", "reasoning_text")
 
+# Stamp on a stored Gemini ``thought_signature``: the upstream that MINTED it, i.e. the host a replay
+# must return it to. Gemini rejects a signature issued elsewhere ("signed or encrypted reasoning from
+# another provider has no representation in Gemini generateContent", HTTP 422), and the replay gate
+# used to ask only whether the TARGET looked like Gemini, so a fallback-minted signature poisoned every
+# later turn of the session (#141770). Host, not provider name: the provider label is Hermes-side and
+# auxiliary replay paths (``agent/auxiliary_wire.py``) only know the base URL, while the host is the
+# upstream that minted and will validate the signature. The model id is deliberately NOT part of the
+# stamp — a fallback restore may spell the same model differently, and dropping a signature the
+# minting route needs is its own 400 (Gemini 3 "function call is missing a thought_signature").
+SIGNATURE_ROUTE_KEY = "_signature_route"
+
+
+def signature_route(base_url: Any) -> str:
+    """The upstream identity a signature replays to: the base URL's lowercased host (``""`` if absent)."""
+    from utils import base_url_hostname
+
+    return base_url_hostname(str(base_url or ""))
+
 
 def field(obj: Any, name: str) -> Any:
     """``obj.<name>``, else the same key from pydantic ``model_extra`` (unknown SDK fields park there)."""
@@ -39,11 +57,17 @@ def thought_signature(extra: Any) -> Optional[str]:
     return sig if isinstance(sig, str) and sig.strip() else None
 
 
-def carrier_record(assistant_message: Any) -> Optional[dict]:
-    """The private ``reasoning_details`` record for one response message, or None when it has no carrier."""
+def carrier_record(assistant_message: Any, route: Any = None) -> Optional[dict]:
+    """The private ``reasoning_details`` record for one response message, or None when it has no carrier.
+
+    ``route`` (``signature_route(base_url)``) stamps the upstream that minted a ``thought_signature`` so
+    a replay can go back only there; without it the record is the pre-stamp shape.
+    """
     record: dict[str, Any] = {}
     if sig := thought_signature(field(assistant_message, "extra_content")):
         record["extra_content"] = {"google": {"thought_signature": sig}}
+        if route:
+            record[SIGNATURE_ROUTE_KEY] = route
     for key in ("reasoning_opaque", "reasoning_text"):
         value = field(assistant_message, key)
         if isinstance(value, str) and value:
@@ -105,12 +129,17 @@ def _strip_function_signature(tool_calls: list) -> list:
     ]
 
 
-def _shape(msg: Any, reads: tuple[str, ...], copilot: bool) -> Any:
+def _shape(msg: Any, reads: tuple[str, ...], copilot: bool, route: str = "") -> Any:
     if not isinstance(msg, dict) or msg.get("role") != "assistant":
         return msg
     details = msg.get("reasoning_details")
     details = details if isinstance(details, list) else []
     record = next((d for d in details if isinstance(d, dict) and d.get("type") == CARRIER_TYPE), None)
+    minted_at = (record or {}).get(SIGNATURE_ROUTE_KEY)
+    if isinstance(minted_at, str) and minted_at and route and minted_at != route:
+        # Another upstream minted this signature: stored history keeps it (a later return to that
+        # upstream still replays it), this wire copy must not carry it (#141770).
+        reads = tuple(key for key in reads if key != "extra_content")
     tool_calls = msg.get("tool_calls")
     tool_calls = tool_calls if isinstance(tool_calls, list) else []
     fn_sig = not copilot and any(
@@ -143,5 +172,6 @@ def shape_wire_carriers(messages: list, *, model: Any, base_url: Any) -> list:
 
     reads = _route_reads(model, base_url)
     copilot = base_url_host_matches(str(base_url or ""), "githubcopilot.com")
-    shaped = [_shape(m, reads, copilot) for m in messages]
+    route = signature_route(base_url)
+    shaped = [_shape(m, reads, copilot, route) for m in messages]
     return messages if all(a is b for a, b in zip(shaped, messages)) else shaped
