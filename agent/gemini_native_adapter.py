@@ -298,10 +298,18 @@ def _coerce_content_to_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
+# OpenAI-shaped content items that carry base64 media. ``tools.vision_tools._media_messages``
+# sends video as ``video_url``; a type missing from this set is silently dropped from the
+# request, which is how a ``video_analyze`` turn reached Gemini as text only (#141763).
+_MEDIA_PART_TYPES = ("image_url", "video_url")
+
+
 def _inline_data_part(item: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """``inlineData`` part for an ``image_url`` item carrying a ``data:`` URL; None otherwise."""
-    url = (item.get("image_url") or {}).get("url") or ""
-    if item.get("type") != "image_url" or not isinstance(url, str) or not url.startswith("data:"):
+    """``inlineData`` part for an image/video item carrying a ``data:`` URL; None otherwise."""
+    kind = item.get("type")
+    media = item.get(kind) if isinstance(kind, str) else None
+    url = media.get("url") if isinstance(media, dict) else ""
+    if kind not in _MEDIA_PART_TYPES or not isinstance(url, str) or not url.startswith("data:"):
         return None
     try:
         header, encoded = url.split(",", 1)
