@@ -128,6 +128,26 @@ def _over_limit(new_total: int, limit: int) -> str:
     return f"would put memory at {new_total:,}/{limit:,} chars: free at least {new_total - limit:,} chars"
 
 
+# The batch's whole-entry/patch action vocabulary, in the order the refusal names it. Shared by the
+# pre-walk guard and ``_apply_batch_op`` so a typo is answered with the actions that actually exist
+# (the old message omitted ``replace``, a supported action — #141561).
+_BATCH_ACTION_LIST = "add, replace, patch, or remove"
+_BATCH_ACTIONS = frozenset({"add", "replace", "remove", "patch"})
+
+
+def _largest_entries(entries: list[str], *, keep: int = 3) -> list[dict[str, int]]:
+    """Per-entry char counts for the entries worth shrinking, largest first.
+
+    Counts and 1-based positions only: the entries themselves already ride the model's context
+    (MEMORY.md is in the system prompt), so what an over-budget consolidation lacks is their SIZE.
+    Echoing text here would pay the store back into the context the call exists to shrink
+    (#97316), which is why the abort never carries ``current_entries`` (#141561).
+    """
+    ranked = sorted(enumerate(entries, 1), key=lambda pair: (-len(pair[1]), pair[0]))
+    return [{"index": index, "chars": len(text)} for index, text in ranked[:keep]]
+
+
+
 # Patch content cannot be empty, and 'remove' would drop the sibling facts in the entry.
 PATCH_DROP_HINT = "To drop text inside an entry, patch a longer span that contains it; 'remove' deletes the whole entry."
 
@@ -325,15 +345,21 @@ class MemoryStore:
             _error(message, "over_budget", current_entries=self._entries_for(target), usage=self._usage(target)))
 
     def _batch_failure(self, target: str, message: str, failure_class: str,
-                       closest_entries: Optional[list[str]] = None) -> dict[str, Any]:
+                       closest_entries: Optional[list[str]] = None,
+                       largest_entries: Optional[list[dict[str, int]]] = None) -> dict[str, Any]:
         """Batch-abort failure WITHOUT ``current_entries``: the store did not change and the
         caller already holds the inventory, so echoing it made each consolidation retry
         grow the context it was invoked to shrink (#97316). A zero-match op carries only
-        its few ``closest_entries``."""
+        its few ``closest_entries``; an over-budget abort carries ``largest_entries`` —
+        index + char count per entry, never text — so one retry can pick victims."""
+        extra: dict[str, Any] = {}
+        if closest_entries:
+            extra["closest_entries"] = closest_entries
+        if largest_entries:
+            extra["largest_entries"] = largest_entries
         return self._consolidation_failure(
             _error(message + " No operations were applied (batch is all-or-nothing).", failure_class,
-                   usage=self._usage(target),
-                   **({"closest_entries": closest_entries} if closest_entries else {})))
+                   usage=self._usage(target), **extra))
 
     def _mutate(self, target: str, mutate, *, skip_drift: bool = False) -> dict[str, Any]:
         """Lock, re-read from disk, run ``mutate(entries, limit)`` -> ``(new_entries, message)``
@@ -505,7 +531,7 @@ class MemoryStore:
                 working.append(content)
             return None, None, "none", None
         if act not in ("replace", "remove", "patch"):
-            return f"{pos}: unknown action. Use add, patch, or remove.", None, "invalid_args", None
+            return f"{pos}: unknown action. Use {_BATCH_ACTION_LIST}.", None, "invalid_args", None
         if not old_text.strip():
             return f"{pos}: old_text is required.", None, "missing_old_text", None
         if act == "replace" and not content:
@@ -557,6 +583,15 @@ class MemoryStore:
         if not operations:
             return _error("operations list is empty.", "invalid_args")
         ops = [op or {} for op in operations]
+        # Parse before any work: an unknown action name is a typo in the call, so it is answered
+        # with EVERY offending position at once and no op is applied — the walk below would abort
+        # on the first one, leaving a mistyped batch looking like a single bad op (#141561).
+        bad_actions = [(index + 1, str(op.get("action") or "unknown"))
+                       for index, op in enumerate(ops) if op.get("action") not in _BATCH_ACTIONS]
+        if bad_actions:
+            named = ", ".join(f"Operation {index} ({action})" for index, action in bad_actions)
+            return self._batch_failure(
+                target, f"{named}: unknown action. Use {_BATCH_ACTION_LIST}.", "invalid_args")
         # Scan every add/replace content BEFORE touching disk -- one poisoned op rejects the batch.
         for i, op in enumerate(ops):
             scan_error = op.get("action") in {"add", "replace"} and op.get("content") and _scan_memory_content(op["content"])
@@ -594,8 +629,10 @@ class MemoryStore:
             if new_total > limit:
                 return self._batch_failure(target, (
                     f"Applying all {len(operations)} operations {_over_limit(new_total, limit)} more. Add "
-                    f"removes or shortening patches of other stale entries to the same batch, then retry."),
-                    "over_budget")
+                    f"removes or shortening patches of other stale entries to the same batch, then retry. "
+                    f"largest_entries gives each entry's index and char count (counts only — the text is "
+                    f"already in your memory context), so one retry can pick the victims."),
+                    "over_budget", largest_entries=_largest_entries(entries))
             if not commit:
                 return {"success": True, "matched_entries": matched}
             # op index -> full entry text its replace/remove selected (#117952), 1-based to
