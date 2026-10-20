@@ -31,6 +31,8 @@ BACKEND_DISABLED = "off"
 
 # Cloud daemon names become the BU_NAME env var
 _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# Anything a session name may not carry (see _SESSION_RE); used to derive one from a task id.
+_SESSION_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
 # Set on the env dict by the CDP resolvers when the resolved browser is EXCLUSIVE to this named session
 # (per-name provider / named BU cloud / Lightpanda). Popped before the subprocess launches — never exported.
@@ -321,6 +323,39 @@ def _workspace_dir(task_id: Optional[str]) -> Optional[str]:
     except Exception as e:
         logger.debug("browser_exec workspace unavailable: %s", e)
         return None
+
+
+# A SHARED browser (browser.cdp_url / /browser connect / BU_CDP_* in the environment) is ONE
+# long-lived Chrome that every chat drives. An unnamed call there resolved to the single ``default``
+# daemon — one tab that two chats then steered in turn (#141692) — so an unnamed call on a shared
+# browser is named after its TASK: stable across one chat's calls, distinct between chats, and the
+# own-tab preamble keeps each chat on its own page.
+_SHARED_TASK_SESSION_PREFIX = "task-"
+_SHARED_TASK_SESSION_MAX = 32
+
+
+def shared_cdp_browser_configured() -> bool:
+    """True when every chat drives one Chrome: a CDP override (``browser.cdp_url`` /
+    ``/browser connect``) or BU_CDP_* already in the environment. Read before routing, since an
+    override needs no launch — the shared tab is what the isolation has to cover."""
+    if os.environ.get("BU_CDP_WS") or os.environ.get("BU_CDP_URL"):
+        return True
+    try:
+        from tools.browser_tool_cdp import _get_cdp_override
+    except Exception as e:  # pragma: no cover — a stubbed browser_tool in tests reads as "no override"
+        logger.debug("browser_exec CDP override lookup unavailable: %s", e, exc_info=True)
+        return False
+    return bool(_quiet(_get_cdp_override, ""))
+
+
+def shared_browser_session(task_id: Optional[str]) -> str:
+    """``BU_NAME`` for an UNNAMED call on a shared CDP browser, "" to keep the shared ``default``
+    (nothing to isolate without a task id: a CLI one-shot has none). Sanitized to the session
+    grammar so a task id can never smuggle a separator into a daemon name."""
+    if not task_id or not shared_cdp_browser_configured():
+        return ""
+    safe = _SESSION_UNSAFE_RE.sub("_", str(task_id))[:_SHARED_TASK_SESSION_MAX].strip("_")
+    return f"{_SHARED_TASK_SESSION_PREFIX}{safe}" if safe else ""
 
 
 def _find_screenshot(stdout: str, since: float) -> Optional[str]:
@@ -784,6 +819,10 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     verdict = _code_url_verdict(code)
     if verdict.blocked:
         return tool_error(verdict.blocked)
+    # A shared CDP browser is one Chrome for every chat, and a call with no ``session`` would land on
+    # the single ``default`` daemon: two chats then steer each other's page (#141692). Name the call
+    # after its task so each chat gets its own daemon and, through the preamble below, its own tab.
+    session = session or shared_browser_session(task_id)
     # One endpoint per call: any private URL sends the whole call to the local sidecar. A call with no URL
     # literal stays on the route the previous call took (browser_navigate's _last_session_key twin).
     route_key = _backend_cache_key(task_id, session)

@@ -13,6 +13,7 @@ Covers the three seams the integration relies on:
 """
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -705,6 +706,81 @@ class TestOwnTabPreamble:
         ast.parse(bu_cli._OWN_TAB_PREAMBLE)
         # and composes with model code
         ast.parse(bu_cli._OWN_TAB_PREAMBLE + "print('x')")
+
+
+class TestSharedCdpTaskSessions:
+    """An UNNAMED ``browser_exec`` on a shared CDP browser (``browser.cdp_url`` / ``/browser
+    connect``) used to resolve to the one ``default`` daemon and tab, so two chats drove the same
+    page and clobbered each other (#141692). The call is named after its task instead: stable
+    inside a chat, distinct between chats, and the own-tab preamble then pins each to its own tab.
+    A call with no task id (CLI one-shot) keeps the shared default, and the packaged-Chromium
+    engine — where a name means a whole new browser — is deliberately unchanged."""
+
+    def _run(self, tmp_path, monkeypatch, *, task_id=None, shared_cdp="", provider=False):
+        monkeypatch.setattr("tools.browser_tool_cdp._get_cdp_override", lambda: shared_cdp)
+        if provider:
+            monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: object())
+            monkeypatch.setattr(
+                bt_session, "_get_session_info",
+                lambda key: {"cdp_url": "wss://browser.example/cdp/" + key},
+            )
+        else:
+            monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: None)
+        # Echo the code the harness received, then the BU_NAME it was given.
+        cli = _fake_cli(tmp_path, 'cat\necho "bu_name:${BU_NAME:-unset}"\n')
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+        raw = bu_cli.browser_exec("print('payload')", session="", task_id=task_id)
+        assert isinstance(raw, str), raw
+        return json.loads(raw)
+
+    def test_unnamed_shared_browser_is_named_after_the_task(self, tmp_path, monkeypatch):
+        result = self._run(
+            tmp_path, monkeypatch, task_id="t_6ad3477d", shared_cdp="http://127.0.0.1:9222"
+        )
+        assert result["success"] is True
+        assert "bu_name:task-t_6ad3477d" in result["output"]
+        # its own tab: the preamble is what keeps two chats off each other's page
+        assert "_hermes_ensure_own_tab" in result["output"]
+
+    def test_two_chats_on_the_shared_browser_get_different_sessions(self, tmp_path, monkeypatch):
+        first = self._run(
+            tmp_path, monkeypatch, task_id="t_6ad3477d", shared_cdp="http://127.0.0.1:9222"
+        )
+        second = self._run(
+            tmp_path, monkeypatch, task_id="t_23b931af", shared_cdp="http://127.0.0.1:9222"
+        )
+        assert "bu_name:task-t_6ad3477d" in first["output"]
+        assert "bu_name:task-t_23b931af" in second["output"]
+
+    def test_same_chat_keeps_one_session_across_calls(self, tmp_path, monkeypatch):
+        first = self._run(tmp_path, monkeypatch, task_id="s_1", shared_cdp="http://127.0.0.1:9222")
+        second = self._run(tmp_path, monkeypatch, task_id="s_1", shared_cdp="http://127.0.0.1:9222")
+        assert "bu_name:task-s_1" in first["output"]
+        assert "bu_name:task-s_1" in second["output"]
+
+    def test_unnamed_call_without_a_task_id_keeps_the_shared_default(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, task_id=None, shared_cdp="http://127.0.0.1:9222")
+        assert result["success"] is True
+        assert "bu_name:unset" in result["output"]
+        assert "_hermes_ensure_own_tab" not in result["output"]
+
+    def test_packaged_chromium_unnamed_call_is_unchanged(self, tmp_path, monkeypatch):
+        """No CDP override: a name would launch a whole new Chromium per chat, which is a
+        resource decision of its own — the shared default daemon stays."""
+        result = self._run(tmp_path, monkeypatch, task_id="t_6ad3477d")
+        assert result["success"] is True
+        assert "bu_name:unset" in result["output"]
+        assert "_hermes_ensure_own_tab" not in result["output"]
+
+    def test_task_id_with_unsafe_characters_is_sanitized(self, tmp_path, monkeypatch):
+        result = self._run(
+            tmp_path, monkeypatch, task_id="chat/../../etc:1", shared_cdp="http://127.0.0.1:9222"
+        )
+        assert result["success"] is True
+        match = re.search(r"bu_name:(\S+)", result["output"])
+        assert match and match.group(1) != "unset"
+        # A derived name must satisfy the harness's own session grammar, or BU_NAME is rejected.
+        assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", match.group(1)), match.group(1)
 
 
 class TestProviderPickerIntegration:
