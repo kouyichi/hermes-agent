@@ -58,6 +58,17 @@ MAX_DERIVED_TITLE_CHARS = 48
 # answer-shaped output guard in generate_title; port of can1357/oh-my-pi#7306). 12 leaves headroom for
 # legitimate wordy titles while excluding full-sentence answers.
 _MAX_TITLE_WORDS = 12
+# The word ceiling above is unreadable for scripts that do not separate words with spaces: a
+# 76-character Chinese reply is 3 "words" and passes. The same 3-7 word task there is a short
+# character run, so the guard gets a second budget — 12 words at ~1.5 characters per CJK word
+# (#141969 measured 19-40 such characters on stored replies, 6-14 on real titles).
+_MAX_TITLE_CJK_CHARS = 18
+# Ideographs (BMP + Ext A + compatibility runs), kana and Bopomofo: the scripts that do not
+# delimit words with spaces at all. Hangul is deliberately absent — Korean separates words with
+# spaces, so the word ceiling above already measures it correctly, and a character budget there
+# would reject a legitimately wordy Korean title. Punctuation is not counted either: the budget
+# is "how much writing is here", not a sentence-shape test.
+_CJK_SPACELESS_RE = re.compile("[\u3040-\u312f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 # Output budget for the title call: room for a fenced/prefixed JSON reply and for a reasoning model that
 # thinks despite the thinking-disabled request, without letting a runaway reply burn minutes.
 TITLE_MAX_TOKENS = 512
@@ -425,6 +436,14 @@ def _title_from_reasoning(message: Any) -> str:
     return ""
 
 
+def _cjk_char_count(text: str) -> int:
+    """Characters from a script that does not delimit words with spaces (CJK ideographs, kana,
+    Bopomofo). ``str.split()`` cannot size such a title — it returns one "word" per clause however
+    long the reply is — so the answer-shaped guard measures it in these instead. Hangul is not
+    counted: Korean does separate words with spaces, so the word ceiling already covers it."""
+    return len(_CJK_SPACELESS_RE.findall(text))
+
+
 def _clean_title(text: str) -> Optional[str]:
     """Normalize a model-produced title, or None when nothing usable remains."""
     title = _strip_title_prefix(" ".join((text or "").split()).strip("\"'").strip()).rstrip(".!,;:")
@@ -536,9 +555,15 @@ def generate_title(
         # something I recognize..."). Truncating would store half an assistant blob as the session title,
         # which is still an assistant blob — reject instead so the caller retries on the next exchange
         # (maybe_auto_title retries a placeholder title through the third exchange). Port of can1357/oh-my-pi#7306.
-        if title is not None and len(title.split()) > _MAX_TITLE_WORDS:
+        # A spaceless script (Chinese/Japanese/Korean) is measured in characters instead: there the
+        # word count is one per clause, so it never reaches the ceiling however long the reply is.
+        words, spaceless = len((title or "").split()), _cjk_char_count(title or "")
+        if words > _MAX_TITLE_WORDS or spaceless > _MAX_TITLE_CJK_CHARS:
             # Answer-shaped output: reject (not truncate) so the caller retries next exchange.
-            logger.debug("Rejecting answer-shaped title output (%d words > %d)", len(title.split()), _MAX_TITLE_WORDS)
+            logger.debug(
+                "Rejecting answer-shaped title output (%d words > %d, %d spaceless chars > %d)",
+                words, _MAX_TITLE_WORDS, spaceless, _MAX_TITLE_CJK_CHARS,
+            )
             return None
         # Example-echo guard: a title that parrots one of the prompt's own
         # examples back verbatim says nothing about the session — reject it so
