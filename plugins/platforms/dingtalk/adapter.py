@@ -57,6 +57,7 @@ from gateway.platforms._shared import (
 )
 from gateway.platforms.send_targets import StandaloneSendPolicy
 from plugins.platforms.dingtalk.inbound import collect_download_codes, extract_media, extract_text
+from plugins.platforms.dingtalk.media_download import download_media_to_cache, media_hint
 
 
 logger = logging.getLogger(__name__)
@@ -478,7 +479,7 @@ class DingTalkAdapter(BasePlatformAdapter):
             if len(self._session_webhooks) >= _SESSION_WEBHOOKS_MAX:
                 self._session_webhooks.pop(next(iter(self._session_webhooks)))  # evict oldest (dict is non-empty here)
             self._session_webhooks[chat_id] = (session_webhook, getattr(message, "session_webhook_expired_time", 0) or 0)
-        await self._resolve_media_codes(message)  # download codes -> URLs so vision tools can use them
+        await self._resolve_media_codes(message)  # download codes -> local cache paths (gateway admits only local files)
         text = self._extract_text(message)
         msg_type, media_urls, media_types = self._extract_media(message)
         if not text and not media_urls:
@@ -677,7 +678,14 @@ class DingTalkAdapter(BasePlatformAdapter):
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _fetch_download_url(self, code: str, robot_code: str, token: str, obj, key: str) -> None:
-        """Fetch the download URL for one code via the robot SDK and write it back to ``obj[key]``."""
+        """Resolve one download code to a LOCAL cached file path, written back to ``obj[key]``.
+
+        The gateway's admission capturer accepts only absolute local regular files, so the
+        remote ``download_url`` must be fetched here: writing it back (as before #141932) put a
+        URL in ``media_urls``, ``_capture_file`` raised ``RuntimeStoreError('invalid_params')``,
+        and the whole inbound message — text included — was dropped. Any failure now clears the
+        code instead: that attachment is lost, the turn survives.
+        """
         if not self._robot_sdk:
             return logger.warning("[%s] Robot SDK not initialized, cannot resolve media code", self.name)
         try:
@@ -686,14 +694,31 @@ class DingTalkAdapter(BasePlatformAdapter):
                                             dingtalk_robot_models.RobotMessageFileDownloadHeaders, token)
             body = response.body if response else None
             url = getattr(body, "download_url", None) if body else None
-            if not body:
-                logger.warning("[%s] Failed to download media: empty response for code %s", self.name, code)
-            elif url and hasattr(obj, key):
-                setattr(obj, key, url)
-            elif url and isinstance(obj, dict):
-                obj[key] = url
+            if not url:
+                logger.warning("[%s] Failed to resolve media: %s for code %s", self.name,
+                               "empty response" if not body else "no download_url", code)
+                return self._clear_code(obj, key)
+            kind, filename, mime = media_hint(obj, key)
+            local_path = await download_media_to_cache(url, kind=kind, filename=filename, mime=mime)
+            if hasattr(obj, key):
+                setattr(obj, key, local_path)
+            elif isinstance(obj, dict):
+                obj[key] = local_path
+            logger.debug("[%s] Cached inbound media at %s", self.name, local_path)
         except Exception as e:
             logger.error("[%s] Error resolving media code %s: %s", self.name, code, e)
+            self._clear_code(obj, key)
+
+    @staticmethod
+    def _clear_code(obj, key: str) -> None:
+        """Drop an unresolvable code so ``extract_media`` skips the attachment."""
+        try:
+            if isinstance(obj, dict):
+                obj[key] = ""
+            elif hasattr(obj, key):
+                setattr(obj, key, "")
+        except (AttributeError, TypeError):
+            logger.debug("DingTalk: could not clear media code %s on %r", key, type(obj).__name__)
 
     @staticmethod
     def _normalize_markdown(text: str) -> str:

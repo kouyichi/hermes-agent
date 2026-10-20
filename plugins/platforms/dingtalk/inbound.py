@@ -160,8 +160,7 @@ def collect_download_codes(message: Any) -> list[tuple[Any, str]]:
     img_content = getattr(message, "image_content", None)
     if img_content and getattr(img_content, "download_code", None):
         codes.append((img_content, "download_code"))
-    rich_text = getattr(message, "rich_text_content", None)
-    for item in (getattr(rich_text, "rich_text_list", []) or []) if rich_text else []:
+    for item in _rich_list(message) or ():
         if isinstance(item, dict):
             codes.extend((item, key) for key in ("downloadCode", "pictureDownloadCode", "download_code") if item.get(key))
     if (getattr(message, "message_type", "") or "") in ("file", "image"):
