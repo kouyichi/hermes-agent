@@ -36,6 +36,9 @@ SESSION_ID_RECOGNIZERS = (
     re.compile(r"^run_[0-9a-f]{32}$"),
     # acp_adapter/session.py and /v1/responses: str(uuid4()).
     re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
+    # A caller's per-PR review session (plugin-catalog/diaktoros.yaml): f"hermes-review-{owner}-
+    # {repo}-{pr}", owner/repo folded to [A-Za-z0-9_-] and sent as POST /v1/runs ``session_id``.
+    re.compile(r"^hermes-review-[A-Za-z0-9_-]+-\d+$"),
 )
 
 

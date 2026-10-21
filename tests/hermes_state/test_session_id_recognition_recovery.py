@@ -1,8 +1,9 @@
 """Session recovery must recognise every session-id shape this repo really mints.
 
 ``hermes sessions recover`` classifies schema-less lost_and_found rows by the id cell. Ids that
-surfaces DERIVE (cron, /bg, rooms, API server, ACP) instead of minting via ``new_session_id`` were
-dropped, and as a ``parent_session_id`` one of them vetoed layout inference for the whole table.
+surfaces DERIVE (cron, /bg, rooms, API server, ACP, a caller's per-PR review id) instead of minting
+via ``new_session_id`` were dropped, and as a ``parent_session_id`` one of them vetoed layout
+inference for the whole table.
 """
 
 from __future__ import annotations
@@ -28,8 +29,10 @@ API_ID = "api_1790000000_0123abcd"
 API_CHAT_ID = "api-0123456789abcdef"
 RUN_ID = "run_" + "0123456789abcdef" * 2
 UUID_ID = "0b36145a-e5c7-4d2a-9f00-0123456789ab"
+# The review loop's one-session-per-PR id, folded by the caller and sent as POST /v1/runs session_id.
+REVIEW_ID = "hermes-review-s3ntin3l8-runway-ai-usage-tracker-752"
 
-DERIVED_IDS = [CRON_ID, CRON_SLUG_ID, BG_ID, ROOM_ID, TUI_BG_ID, API_ID, API_CHAT_ID, RUN_ID, UUID_ID]
+DERIVED_IDS = [CRON_ID, CRON_SLUG_ID, BG_ID, ROOM_ID, TUI_BG_ID, API_ID, API_CHAT_ID, RUN_ID, UUID_ID, REVIEW_ID]
 
 # Near-misses and arbitrary cell values. These sit at the id position of a candidate
 # layout, so accepting any of them costs real wrong-column-mapping safety.
@@ -46,6 +49,9 @@ NOT_SESSION_IDS = [
     "20260101_100500",
     "bg_abcde", "api_123_0123abcd", "api-0123", "run_" + "a" * 31,
     "0b36145a-e5c7-1d2a-9f00-0123456789ab",
+    "hermes-review-", "hermes-review-752", "hermes-review-foo", "hermes-review-foo-",
+    "hermes-review--752", "hermes-review-foo-75x", "hermes-review-owner repo-12",
+    "review-owner-repo-12",
 ]
 
 
@@ -111,3 +117,32 @@ def test_layout_inference_survives_every_derived_id_shape(store, tmp_path) -> No
     assert report["mapped"]["sessions"] == len(rows)
     assert report["unrecognized_layout_rows"] == 0
     assert report["inferred_layouts"]["sessions"][str(len(columns))] == columns
+
+
+def test_review_session_id_passes_the_ingress_guards_unchanged() -> None:
+    """The id guard and the transcript filename accept the derived id exactly as sent."""
+    from agent.session_persistence import _safe_session_filename_component
+    from gateway.session import _is_path_unsafe
+
+    assert not _is_path_unsafe(REVIEW_ID)
+    assert _safe_session_filename_component(REVIEW_ID) == REVIEW_ID
+
+
+def test_review_session_id_survives_store_and_salvage(store, tmp_path) -> None:
+    """A caller-derived per-PR review id: stored as given, then mapped back by salvage."""
+    add, bulk, connect = store
+    bulk(5)
+    add(REVIEW_ID, source="cli")
+    conn = connect()
+    try:
+        columns, rows = _sessions_rows(conn)
+    finally:
+        conn.close()
+    assert REVIEW_ID in [row[0] for row in rows]
+    _map_as_salvage(tmp_path, columns, rows)
+    mapped = sqlite3.connect(str(tmp_path / "mapped.db"))
+    try:
+        survived = [row[0] for row in mapped.execute("SELECT id FROM sessions")]
+    finally:
+        mapped.close()
+    assert len(survived) == len(rows) and REVIEW_ID in survived
