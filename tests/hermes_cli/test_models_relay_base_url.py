@@ -94,6 +94,57 @@ def test_relay_base_url_is_probed_for_configured_provider(monkeypatch):
     assert profile.calls == [(None, "http://127.0.0.1:9001/deepseek/v1")]
 
 
+@pytest.mark.parametrize(
+    "host", ["api.business.githubcopilot.com", "api.enterprise.githubcopilot.com"]
+)
+def test_a_stock_copilot_plan_host_is_not_a_relay(monkeypatch, host):
+    """Copilot Business/Enterprise sit on their own stock hosts, not on api.githubcopilot.com.
+
+    The token exchange reports ``endpoints.api`` for those accounts, so ``model.base_url``
+    legitimately carries it. Treating that as a third-party relay sent the picker to the
+    curated fallback and hid every model the account's live catalog lists (#142480).
+    """
+    monkeypatch.setattr(
+        models,
+        "_get_model_config_dict",
+        lambda: {"provider": "copilot", "base_url": f"https://{host}"},
+    )
+    calls = []
+
+    def native_catalog(slug, force_refresh):
+        calls.append(slug)
+        return ["live-account-model"]
+
+    monkeypatch.setitem(models._PROVIDER_CATALOG_FETCHERS, "copilot", native_catalog)
+
+    assert models._configured_relay_base_url("copilot") == ""
+    assert models.provider_model_ids("copilot", force_refresh=True) == ["live-account-model"]
+    assert calls == ["copilot"]
+
+
+def test_a_foreign_host_for_the_same_provider_stays_a_relay(monkeypatch):
+    """The stock-host rule is a host family, not "any base_url for this provider"."""
+    monkeypatch.setattr(
+        models,
+        "_get_model_config_dict",
+        lambda: {"provider": "copilot", "base_url": "https://copilot-proxy.example.net/v1"},
+    )
+    assert models._configured_relay_base_url("copilot") == "https://copilot-proxy.example.net/v1"
+
+
+def test_a_path_below_a_stock_copilot_host_stays_a_relay(monkeypatch):
+    """A path under the host is still a sibling route, as pinned for every canonical endpoint."""
+    monkeypatch.setattr(
+        models,
+        "_get_model_config_dict",
+        lambda: {"provider": "copilot", "base_url": "https://api.business.githubcopilot.com/v1"},
+    )
+    assert (
+        models._configured_relay_base_url("copilot")
+        == "https://api.business.githubcopilot.com/v1"
+    )
+
+
 def test_base_url_for_a_different_provider_is_ignored(monkeypatch):
     monkeypatch.setattr(
         models,

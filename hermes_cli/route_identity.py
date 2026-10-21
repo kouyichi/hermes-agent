@@ -83,6 +83,40 @@ def provider_owns_route(provider: Any, base_url: Any, config: Any = None) -> Opt
     return normalize_provider(inferred) == canonical
 
 
+def is_provider_stock_endpoint(provider: Any, base_url: Any) -> bool:
+    """Whether *base_url* is a bare endpoint root on one of *provider*'s own stock hosts.
+
+    An account can be served from a provider's sibling host rather than the one the profile
+    declares: the Copilot token exchange reports ``endpoints.api`` for Business/Enterprise
+    accounts, so ``model.base_url`` carries ``api.business.githubcopilot.com`` (or the
+    ``api.enterprise.`` form) while the profile says ``api.githubcopilot.com``. That route is
+    the vendor's own, so catalog discovery must not treat it as a third-party relay and answer
+    from the curated fallback (#142480).
+
+    Hosts match as a FAMILY — the exact host or a ``.<suffix>`` of it — never as a substring,
+    so a proxy at ``api.githubcopilot.com.evil.example`` stays somebody else's route. A path
+    below the host is deliberately not covered: a relay mounts a vendor route under its own
+    path, and the canonical-URL comparison in ``_configured_relay_base_url`` already treats a
+    sibling path as a relay.
+    """
+    try:
+        parsed = urlsplit(str(base_url or ""))
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if not host or parsed.path.strip("/"):
+        return False
+    from agent.model_metadata import _URL_TO_PROVIDER
+    from hermes_cli.providers import normalize_provider
+
+    canonical = normalize_provider(str(provider or "").strip().lower())
+    for suffix, owner in _URL_TO_PROVIDER.items():
+        bare = suffix.lstrip(".").lower()
+        if (host == bare or host.endswith(f".{bare}")) and normalize_provider(owner) == canonical:
+            return True
+    return False
+
+
 def drop_stale_model_route(model_cfg: Any, provider: Any, config: Any = None) -> tuple[dict[str, Any], bool]:
     """Pop the route keys (``base_url``, ``api_mode``) a previous provider left in ``model:``
     when the block is re-pointed at *provider* without a fresh route (``hermes config set
