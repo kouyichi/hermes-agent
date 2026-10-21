@@ -143,7 +143,15 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
   // the transcript's [attached image: …] marker.
   const deltaImages = visibleDelta.flatMap((e: GroupMessage) => (Array.isArray(e.images) ? e.images : []))
 
-  return { room, memberKey, markKey, prompt, deltaImages, heldIds }
+  // #142740: is the user send this drive was addressed by still inside the
+  // member's UNSEEN delta? A member that already answered the address has had
+  // its watermark moved past it, so its fresh delta carries member entries
+  // only — and any newer user send would have bumped the epoch and killed the
+  // drive. So this is exactly "the address is still unanswered", which is the
+  // only state the #129443 nudge exists for.
+  const addressInDelta = delta.some((entry: GroupMessage) => entry.from?.kind === 'user')
+
+  return { room, memberKey, markKey, prompt, deltaImages, heldIds, addressInDelta }
 }
 
 /** Each invocation owns its descriptor, so an old completion cannot clear a newer turn. */
@@ -165,6 +173,36 @@ async function runVisibleMemberTurn(
   }
 }
 
+/** #129443 + #142740: is this turn's "(pass)" one that must be re-asked?
+ *  Only while the user's address is still UNANSWERED **and** still inside the
+ *  member's payload.
+ *
+ *  `addressInDelta` is what tells those apart: a member that already answered
+ *  the address has had its watermark moved past it, so its fresh delta carries
+ *  member entries only (any newer user send bumps the epoch and ends the
+ *  drive). Re-asking it anyway asserts a present-tense address its payload
+ *  does not contain — which an LLM member reports back to the user as "your
+ *  mention arrived, the text did not", the phantom-delivery bug #142740 — and
+ *  burns two model calls on a settled address.
+ *
+ *  `isCurrent()` (not the bare binding): a superseded drive's pass is discarded
+ *  by the epoch check after the turn, so nudging it can only burn a model call
+ *  whose result is never committed. */
+function shouldNudgeAddressedPass(
+  context: GroupRoundMemberContext,
+  memberKey: string,
+  reply: null | string,
+  addressInDelta: boolean
+) {
+  return (
+    addressInDelta &&
+    context.isCurrent() &&
+    reply !== null &&
+    isGroupPassText(reply) &&
+    Boolean(context.addressedKeys?.has(memberKey))
+  )
+}
+
 export async function runGroupRoundMember(
   context: GroupRoundMemberContext,
   member: GroupMember
@@ -181,10 +219,11 @@ export async function runGroupRoundMember(
     return false
   }
 
-  const { room, memberKey, markKey, prompt, deltaImages, heldIds } = prepared
+  const { room, memberKey, markKey, prompt, deltaImages, heldIds, addressInDelta } = prepared
   const anchorId = room.log.at(-1)?.id ?? null
   let reply: null | string = null
   let accepted = false
+  let nudged = false
 
   try {
     reply = await runVisibleMemberTurn(context, member, prompt, deltaImages)
@@ -196,11 +235,11 @@ export async function runGroupRoundMember(
     // bounded nudge re-asks with the directive spelled out; the recovered
     // reply replaces the pass and flows through the exact same commit path
     // below. A nudge that throws falls into the catch like any failed turn.
-    // `isCurrent()` (not the bare binding): a superseded drive's pass is
-    // discarded by the epoch check right below anyway, so nudging it would
-    // burn a model call whose result can never be committed.
-    if (context.isCurrent() && reply !== null && isGroupPassText(reply) && context.addressedKeys?.has(memberKey)) {
+    if (shouldNudgeAddressedPass(context, memberKey, reply, addressInDelta)) {
       reply = await runVisibleMemberTurn(context, member, `${prompt}${GROUP_ADDRESSED_NUDGE_SUFFIX}`, deltaImages)
+      // `nudged` means "re-asked and the re-ask answered": a timed-out nudge
+      // leaves it false, exactly as if no nudge had been issued.
+      nudged = reply !== null
     }
 
     accepted = true
@@ -304,14 +343,16 @@ export async function runGroupRoundMember(
 
   if (reply !== null && spoke) {
     appendGroupChatEntry(context.group, groupMemberAuthor(member), reply, thread)
-  } else if (reply !== null && context.isCurrent() && context.addressedKeys?.has(memberKey)) {
+  } else if (nudged && context.isCurrent() && context.addressedKeys?.has(memberKey)) {
     // #129443: the nudge was passed on too. Record the noncompliance where
     // the user looks (activity row + roster badge) instead of letting the
     // user's explicit address settle as ordinary quiet consensus. Only a
     // CURRENT drive's pass is disclosed: a turn the epoch check just
     // tolerated committing (a cross-thread send superseded its drive) is
     // stale residue, and flagging it would point the user at an address
-    // their newer send already moved past.
+    // their newer send already moved past. #142740: `nudged` — "passed twice"
+    // is only true of a pass that was actually re-asked; a later round's pass
+    // on an address this member already answered is neither.
     const reason = 'explicitly addressed member passed twice'
 
     recordGroupActivity(context.group, {

@@ -19,7 +19,7 @@ import type * as groupChat from './group-chat'
 import type * as groupMembership from './group-membership'
 import type * as groupRounds from './group-rounds'
 import { createGroupGateway, drain, runTimersInline, scriptedStorage } from './group-test-utils'
-import type { GatewayOptions, ScriptedGateway } from './group-test-utils'
+import type { GatewayOptions, ScriptedGateway, ScriptedTurn } from './group-test-utils'
 import type { GroupMember, GroupMessage } from './types'
 
 const { host } = vi.hoisted(() => ({ host: {} as Record<string, unknown> }))
@@ -158,5 +158,78 @@ describe('an addressed member that (pass)ed', () => {
     expect(log(room, 'Quiet')).toHaveLength(1)
     expect(log(room, 'Quiet')[0].from.kind).toBe('user')
     expect(room.activity.currentGroupActivity('Quiet').filter(event => event.kind === 'failed')).toEqual([])
+  })
+})
+
+describe('an address that was already answered (#142740)', () => {
+  /** Answer the first turn, pass every later one: the normal end of a drive,
+   *  where the addressed member has already answered and the teammate's
+   *  follow-up adds nothing for it. */
+  const answerOnce = () => {
+    const answered = new Set<string>()
+
+    return (turn: ScriptedTurn) => {
+      if (turn.prompt.includes('explicitly addressed') || answered.has(turn.profile)) {
+        return '(pass)'
+      }
+
+      answered.add(turn.profile)
+
+      return 'answered the owner'
+    }
+  }
+
+  it('never re-asks a member that answered the address earlier in the drive', async () => {
+    const room = await loadRoom({ turn: answerOnce() })
+
+    room.rounds.sendToGroupChat('Answered', MEMBERS, '@everyone status?')
+    await settle(room, 'Answered')
+
+    const calls = room.gateway.calls
+
+    // Two answers, plus ONE follow-up read of the teammate's reply (the trailing
+    // member's watermark already covers the room, so it has nothing new to read).
+    expect(calls).toHaveLength(3)
+    expect(calls.some(call => call.prompt.includes('explicitly addressed'))).toBe(false)
+    expect(
+      log(room, 'Answered')
+        .filter(entry => entry.from.kind === 'member')
+        .map(entry => entry.text)
+    ).toEqual(['answered the owner', 'answered the owner'])
+    expect(room.activity.currentGroupActivity('Answered').filter(event => event.kind === 'failed')).toEqual([])
+  })
+
+  it('still nudges the addressed member that never answered, and only that member', async () => {
+    const answered = new Set<string>()
+
+    const room = await loadRoom({
+      turn: (turn: ScriptedTurn) => {
+        if (turn.profile === 'research') {
+          return '(pass)'
+        }
+
+        if (turn.prompt.includes('explicitly addressed') || answered.has(turn.profile)) {
+          return '(pass)'
+        }
+
+        answered.add(turn.profile)
+
+        return 'answered the owner'
+      }
+    })
+
+    room.rounds.sendToGroupChat('Partial', MEMBERS, '@everyone status?')
+    await settle(room, 'Partial')
+
+    const nudged = room.gateway.calls.filter(call => call.prompt.includes('explicitly addressed'))
+
+    expect(nudged.map(call => call.profile)).toEqual(['research'])
+    expect(room.activity.currentGroupActivity('Partial').filter(event => event.kind === 'failed')).toEqual([
+      expect.objectContaining({
+        kind: 'failed',
+        member: room.membership.groupMemberKey(MEMBERS[0]),
+        reason: 'explicitly addressed member passed twice'
+      })
+    ])
   })
 })
