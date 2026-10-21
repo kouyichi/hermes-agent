@@ -1579,7 +1579,13 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"ok": False, "error": error, "tools": [], "oauth_needed": oauth_needed,
                          "oauth_tokens_present": tokens_present})
     try:
-        tools = mc._probe_single_server(name, cfg, details=details)
+        from tools.mcp_oauth import suppress_interactive_oauth
+
+        # Same boundary as the dashboard /test endpoint (#142406): the Desktop health sweep drives
+        # this RPC on a timer, and a console-capable backend would otherwise open a browser tab
+        # for a token nobody is there to re-authorize.
+        with suppress_interactive_oauth():
+            tools = mc._probe_single_server(name, cfg, details=details)
         token_present = mc._oauth_tokens_present(name) if needs_oauth_token else True
     except Exception as exc:
         return failure(str(exc), needs_oauth_token, mc._oauth_tokens_present(name) if needs_oauth_token else None)

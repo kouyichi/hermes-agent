@@ -222,7 +222,14 @@ async def test_mcp_server(name: str, profile: Optional[str] = None):
     needs_oauth_token = servers[name].get("auth") == "oauth"
 
     def _probe():
-        tools = _probe_single_server(name, servers[name], details=details)
+        from tools.mcp_oauth import suppress_interactive_oauth
+
+        # A test is a health check, not a login (#142406): the Desktop health sweep POSTs here
+        # every 30 min, so with a console on the backend's stdin the process-level TTY heuristic
+        # answered "interactive" and opened a consent tab per sweep. Explicit authorization has
+        # its own entry point (/auth below).
+        with suppress_interactive_oauth():
+            tools = _probe_single_server(name, servers[name], details=details)
         return tools, (_oauth_tokens_present(name) if needs_oauth_token else True)
 
     try:  # probe blocks on a dedicated MCP event loop — keep it off the FastAPI loop
