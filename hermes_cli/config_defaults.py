@@ -338,12 +338,12 @@ DEFAULT_CONFIG = {
         # shell is bash, ~/.profile, ~/.bash_profile, ~/.bashrc are auto-sourced in that order (see
         # auto_source_bashrc).
         "shell_init_files": [],
-        # Source ~/.profile, ~/.bash_profile, ~/.bashrc in the snapshot login shell to capture PATH
-        # additions, functions, and aliases that `bash -l -c` misses (bash skips bashrc when
-        # non-interactive; Debian/Ubuntu ~/.bashrc short-circuits). ~/.profile and ~/.bash_profile
-        # go first because n/nvm/asdf write PATH exports there without an interactivity guard. Turn
-        # off if an rc file misbehaves when sourced non-interactively (exits on TTY check).
-        "auto_source_bashrc": True,
+        # Source ~/.profile, ~/.bash_profile, ~/.bashrc in the snapshot login shell so PATH exports
+        # `bash -l -c` misses (nvm/asdf/pyenv) land in it; ~/.profile goes first because those
+        # installers write PATH there without an interactivity guard, and bashrc is named explicitly
+        # because non-interactive bash skips it. Turn auto_source_bashrc off if an rc misbehaves
+        # when sourced; turn login_shell off to run the snapshot as `bash -c` (only shell_init_files).
+        "auto_source_bashrc": True, "login_shell": True,
         # The default sandbox for every container backend: the nikolaik/python-nodejs base
         # (Python 3.13 / Node 26) plus a display stack, so Bot Screen, computer_use and the
         # bot's browser run INSIDE the sandbox and the pane can watch them (see bot_desktop).

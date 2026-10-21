@@ -812,29 +812,35 @@ _hermes_site_packages: list[Path] | None = None  # lazily cached by local_python
 
 
 # --- Login-shell init files ---
-def _read_terminal_shell_init_config() -> tuple[list[str], bool]:
-    """(shell_init_files, auto_source_bashrc) from config.yaml; defaults on any
-    failure so terminal execution never breaks."""
+def _read_terminal_shell_init_config() -> tuple[list[str], bool, bool]:
+    """(shell_init_files, auto_source_bashrc, login_shell) from config.yaml; defaults on any
+    failure so terminal execution never breaks. ``login_shell`` (default true) decides whether
+    the session snapshot runs under ``bash -l`` at all — false runs ``bash -c``, so the only
+    files sourced are the configured init files (#142526)."""
     try:
         from hermes_cli.config import load_config
         terminal_cfg = (load_config() or {}).get("terminal") or {}
         files = terminal_cfg.get("shell_init_files") or []
         if not isinstance(files, list):
             files = []
-        return [str(f) for f in files if f], bool(terminal_cfg.get("auto_source_bashrc", True))
+        return ([str(f) for f in files if f], bool(terminal_cfg.get("auto_source_bashrc", True)),
+                bool(terminal_cfg.get("login_shell", True)))
     except Exception:
-        return [], True
+        return [], True, True
 
 
-def _resolve_shell_init_files() -> list[str]:
+def _resolve_shell_init_files(
+        settings: tuple[list[str], bool, bool] | None = None) -> list[str]:
     """Files to source before the login-shell snapshot (``~``/``${VAR}`` expanded,
     missing dropped). ``auto_source_bashrc`` applies only without an explicit list:
     ~/.profile and ~/.bash_profile first (no interactivity guard; where
     n/nvm/asdf/pyenv add PATH), ~/.bashrc last (Debian's returns early when
-    non-interactive, but guard-less bashrcs keep working)."""
-    explicit, auto_bashrc = _read_terminal_shell_init_config()
+    non-interactive, but guard-less bashrcs keep working). ``login_shell: false`` skips
+    the auto candidates entirely — they exist to stand in for what ``bash -l`` reads, so
+    sourcing them would defeat the setting (#142526)."""
+    explicit, auto_bashrc, login_shell = settings or _read_terminal_shell_init_config()
     candidates = explicit or (["~/.profile", "~/.bash_profile", "~/.bashrc"]
-                              if auto_bashrc and not _IS_WINDOWS else [])
+                              if auto_bashrc and login_shell and not _IS_WINDOWS else [])
     resolved: list[str] = []
     for raw in candidates:
         try:
@@ -1101,9 +1107,15 @@ class LocalEnvironment(BaseEnvironment):
         bash = _find_bash()
         # Login invocations (init_session's env snapshot) source the user's rc /
         # custom init files so nvm/asdf/pyenv land on PATH in the snapshot.
+        # terminal.login_shell: false keeps that sourcing but drops ``bash -l``, whose own
+        # startup files an agent-writable HOME could use to rewrite PATH for every later
+        # command (#142526).
+        login_args: list[str] = []
         if login:
-            cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
-        args = [bash, *(["-l"] if login else []), "-c", cmd_string]
+            settings = _read_terminal_shell_init_config()
+            cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files(settings))
+            login_args = ["-l"] if settings[2] else []
+        args = [bash, *login_args, "-c", cmd_string]
         self._recover_cwd()
         proc = subprocess.Popen(
             args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",

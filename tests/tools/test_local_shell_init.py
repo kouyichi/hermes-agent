@@ -14,6 +14,7 @@ import pytest
 from tools.environments.local import (
     LocalEnvironment,
     _prepend_shell_init,
+    _read_terminal_shell_init_config,
     _resolve_shell_init_files,
 )
 
@@ -28,7 +29,7 @@ class TestResolveShellInitFiles:
         # Default config: auto_source_bashrc on, no explicit list.
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
-            return_value=([], True),
+            return_value=([], True, True),
         ):
             resolved = _resolve_shell_init_files()
 
@@ -46,7 +47,7 @@ class TestResolveShellInitFiles:
 
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
-            return_value=([], True),
+            return_value=([], True, True),
         ):
             resolved = _resolve_shell_init_files()
 
@@ -69,7 +70,7 @@ class TestResolveShellInitFiles:
 
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
-            return_value=([], True),
+            return_value=([], True, True),
         ):
             resolved = _resolve_shell_init_files()
 
@@ -81,7 +82,7 @@ class TestResolveShellInitFiles:
 
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
-            return_value=([], True),
+            return_value=([], True, True),
         ):
             resolved = _resolve_shell_init_files()
 
@@ -92,7 +93,7 @@ class TestResolveShellInitFiles:
         monkeypatch.setenv("HOME", str(tmp_path))
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
-            return_value=([str(tmp_path / "does-not-exist.sh")], False),
+            return_value=([str(tmp_path / "does-not-exist.sh")], False, True),
         ):
             resolved = _resolve_shell_init_files()
 
@@ -118,6 +119,59 @@ class TestPrependShellInit:
         # The path must survive as the shell receives it; embedded single
         # quote is escaped as '\'' rather than breaking the outer quoting.
         assert "o'\\''malley" in wrapped
+
+
+class TestLoginShellSetting:
+    """``terminal.login_shell: false`` (#142526) keeps init-file sourcing but drops ``bash -l``.
+
+    A login shell reads ``~/.bash_profile`` / ``~/.bash_login`` / ``~/.profile`` on its own, so an
+    agent-writable ``HOME`` could otherwise rewrite ``PATH`` for every later command no matter what
+    ``auto_source_bashrc`` says.
+    """
+
+    def test_config_reader_defaults_login_shell_on(self):
+        with patch("hermes_cli.config.load_config", return_value={"terminal": {}}):
+            assert _read_terminal_shell_init_config() == ([], True, True)
+
+    def test_config_reader_reads_login_shell(self):
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"terminal": {"login_shell": False, "auto_source_bashrc": False}},
+        ):
+            assert _read_terminal_shell_init_config() == ([], False, False)
+
+    def test_config_reader_defaults_login_shell_on_when_config_fails(self):
+        with patch("hermes_cli.config.load_config", side_effect=OSError("unreadable")):
+            assert _read_terminal_shell_init_config() == ([], True, True)
+
+    @pytest.mark.platforms("linux")
+    def test_login_shell_off_drops_auto_sourced_rc_files(self, tmp_path, monkeypatch):
+        (tmp_path / ".profile").write_text("export FROM_PROFILE=1\n")
+        (tmp_path / ".bashrc").write_text("export FROM_BASHRC=1\n")
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"terminal": {"login_shell": False}},
+        ):
+            assert _resolve_shell_init_files() == []
+
+    @pytest.mark.platforms("linux")
+    def test_login_shell_off_keeps_explicit_init_files(self, tmp_path, monkeypatch):
+        init_file = tmp_path / "explicit-init.sh"
+        init_file.write_text("export FROM_EXPLICIT=1\n")
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "terminal": {
+                    "login_shell": False,
+                    "shell_init_files": [str(init_file)],
+                }
+            },
+        ):
+            assert _resolve_shell_init_files() == [str(init_file)]
 
 
 @pytest.mark.skipif(
@@ -159,7 +213,7 @@ class TestSnapshotEndToEnd:
 
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
-            return_value=([str(init_file)], False),
+            return_value=([str(init_file)], False, True),
         ):
             env = LocalEnvironment(cwd=str(tmp_path), timeout=15)
             try:
@@ -210,7 +264,7 @@ class TestSnapshotEndToEnd:
 
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
-            return_value=([], True),
+            return_value=([], True, True),
         ):
             env = LocalEnvironment(cwd=str(tmp_path), timeout=15)
             try:
@@ -227,3 +281,56 @@ class TestSnapshotEndToEnd:
         assert str(fake_n_bin) in output
         # bashrc short-circuited on the interactive guard — its export never ran
         assert "FROM_BASHRC=bashrc-should-not-appear" not in output
+
+    def test_login_shell_off_skips_startup_files_but_keeps_init_files(
+        self, tmp_path, monkeypatch
+    ):
+        """#142526: the snapshot must not read login startup files either.
+
+        ``~/.bash_login`` is read by ``bash -l`` alone — the guarded source prelude never names
+        it, so its marker isolates the login flag from the init-file list.
+        """
+        init_file = tmp_path / "explicit-init.sh"
+        init_file.write_text('export HERMES_EXPLICIT_PROBE="explicit-ok"\n')
+        (tmp_path / ".bash_login").write_text(
+            'export HERMES_LOGIN_ONLY_PROBE="login-file-read"\n'
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "terminal": {"login_shell": False, "shell_init_files": [str(init_file)]}
+            },
+        ):
+            env = LocalEnvironment(cwd=str(tmp_path), timeout=15)
+            try:
+                result = env.execute(
+                    'echo "LOGIN=$HERMES_LOGIN_ONLY_PROBE"; '
+                    'echo "EXPLICIT=$HERMES_EXPLICIT_PROBE"'
+                )
+            finally:
+                env.cleanup()
+
+        output = result.get("output", "")
+        assert "EXPLICIT=explicit-ok" in output
+        assert "LOGIN=login-file-read" not in output
+
+    def test_login_shell_default_still_reads_startup_files(self, tmp_path, monkeypatch):
+        """Control for the test above: the default snapshot is still ``bash -l``."""
+        (tmp_path / ".bash_login").write_text(
+            'export HERMES_LOGIN_ONLY_PROBE="login-file-read"\n'
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"terminal": {}},
+        ):
+            env = LocalEnvironment(cwd=str(tmp_path), timeout=15)
+            try:
+                result = env.execute('echo "LOGIN=$HERMES_LOGIN_ONLY_PROBE"')
+            finally:
+                env.cleanup()
+
+        assert "LOGIN=login-file-read" in result.get("output", "")

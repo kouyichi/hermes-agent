@@ -191,6 +191,19 @@ terminal:
   auto_source_bashrc: false
 ```
 
+To stop reading shell startup files altogether, run the snapshot without a login shell:
+
+```yaml
+terminal:
+  login_shell: false      # snapshot runs as `bash -c`; only shell_init_files are sourced
+```
+
+`bash -l` reads `/etc/profile` and the first of `~/.bash_profile`, `~/.bash_login`, `~/.profile`
+before Hermes does anything — which matters when `HOME` is writable by the agent, because one line
+there can rewrite `PATH` for every later command. With `login_shell: false` the automatic
+`~/.profile` / `~/.bashrc` sourcing is skipped as well; list anything you still need under
+`shell_init_files`.
+
 #### `uv: command not found`
 
 **Cause:** The `uv` package manager isn't installed or not in PATH.

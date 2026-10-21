@@ -27,7 +27,7 @@ def child_env(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     from tools import env_passthrough
     from tools.environments import local
-    monkeypatch.setattr(local, "_read_terminal_shell_init_config", lambda: ([], False))
+    monkeypatch.setattr(local, "_read_terminal_shell_init_config", lambda: ([], False, True))
     monkeypatch.setattr(env_passthrough, "_config_passthrough", {})
     # The skill-registered allowlist is a process-wide set (see #90004): the
     # registration must survive tool dispatch's copy_context() snapshots, so

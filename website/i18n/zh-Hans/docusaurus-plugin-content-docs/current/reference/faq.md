@@ -190,6 +190,18 @@ terminal:
   auto_source_bashrc: false
 ```
 
+如果连 shell 启动文件也不想读，可以让快照不用登录 shell 运行：
+
+```yaml
+terminal:
+  login_shell: false      # 快照改用 `bash -c`，只 source shell_init_files
+```
+
+`bash -l` 会在 Hermes 执行任何东西之前读取 `/etc/profile` 以及 `~/.bash_profile`、`~/.bash_login`、
+`~/.profile` 中的第一个 —— 当 `HOME` 对 agent 可写时这一点很关键：里面一行就能改写之后每条命令的
+`PATH`。设为 `login_shell: false` 后，自动 source `~/.profile` / `~/.bashrc` 的行为也一并关闭；
+仍然需要的文件请显式列在 `shell_init_files` 下。
+
 #### `uv: command not found`
 
 **原因：** `uv` 包管理器未安装或不在 PATH 中。
