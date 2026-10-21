@@ -42,6 +42,37 @@ def _preview_name(name: str) -> str:
     return name[:80] + "..." if len(name) > 80 else name
 
 
+# Ordered provider sidecars replay the tool blocks captured at normalization time BEFORE
+# ``tool_calls`` (``bedrock_adapter._assistant_blocks``), and they carry the name the model sent —
+# so a name repaired below has to reach the block too, or the next request records a call to a tool
+# that is not in ``toolConfig`` / ``tools`` (#142590). Converse nests the block (``{"toolUse": {...}}``);
+# an Anthropic Messages block is the tool payload itself (``{"type": "tool_use", ...}``).
+_SIDECAR_TOOL_BLOCKS = (
+    ("bedrock_content_blocks", lambda block: block.get("toolUse")),
+    ("anthropic_content_blocks", lambda block: block if block.get("type") == "tool_use" else None),
+)
+
+
+def _apply_tool_name_repairs(assistant_message: Any, renames: dict[str, str]) -> None:
+    """Write repaired names into the ordered sidecar blocks, matched by the name the model sent.
+
+    Deliberately not matched by tool-call id: ids are uniquified before the repair, so a captured
+    block's id can already differ from ``tc.id``. The captured name is the model's own spelling,
+    which is exactly the key the repair table is built from, and a block for a valid call can never
+    carry another call's invalid name. Order, ids and arguments stay byte-identical.
+    """
+    if not renames:
+        return
+    for attr, tool_block in _SIDECAR_TOOL_BLOCKS:
+        blocks = getattr(assistant_message, attr, None)
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            tool = tool_block(block) if isinstance(block, dict) else None
+            if isinstance(tool, dict) and tool.get("name") in renames:
+                tool["name"] = renames[tool["name"]]
+
+
 def _append_tool_error_results(messages, tool_calls, content_for) -> None:
     """One tool-role result per call so every tool_call keeps a matching result."""
     for tc in tool_calls:
@@ -100,14 +131,17 @@ def validate_tool_calls(
 
     # Repair mismatched tool names before validating (model hallucinations).
     repaired_ids = set()
+    repaired_names: dict[str, str] = {}
     for tc in tool_calls:
         if tc.function.name not in valid_names:
             repaired = agent._repair_tool_call(tc.function.name)
             if repaired:
                 agent._vprint(f"{agent.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'",
                               force=True, diagnostic=True)
+                repaired_names[tc.function.name] = repaired
                 tc.function.name = repaired
                 repaired_ids.add(id(tc))
+    _apply_tool_name_repairs(assistant_message, repaired_names)
     # Counted here, before any exit or normalization, so every emitted call is seen once as the model sent it.
     from hermes_cli.observability.shared_metrics_model import record_tool_call_quality
     record_tool_call_quality(agent, tool_calls, repaired_ids)
