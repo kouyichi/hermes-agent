@@ -113,12 +113,14 @@ def _session_filter_where(
     *, exclude_children: bool = False, source: str | None = None, sources: list[str] | None = None,
     session_key: str | None = None, exclude_sources: list[str] | None = None, cwd_prefix: str | None = None,
     min_message_count: int = 0, archived_only: bool = False, include_archived: bool = False,
-    include_subagents: bool = False, local_created_sources: Sequence[str] | None = None,
+    include_hidden: bool = False, include_subagents: bool = False,
+    local_created_sources: Sequence[str] | None = None,
 ) -> tuple[list[str], list[Any]]:
     """Shared ``sessions s`` WHERE builder so counts line up with listed rows. ``exclude_children``
     hides sub-agent runs and compression continuations but keeps branch/reset children
     (``_LISTABLE_CHILD_SQL``); ``include_subagents`` re-admits the sub-agent runs only
-    (``sessions.show_subagents``). Clause order is part of the SQL text contract."""
+    (``sessions.show_subagents``); ``hidden`` rides in here with ``archived`` so no count can keep
+    counting a row its listing drops. Clause order is part of the SQL text contract."""
     where: list[str] = []
     params: list[Any] = []
     if exclude_children and include_subagents:
@@ -149,6 +151,11 @@ def _session_filter_where(
         where.append("s.archived = 1")
     elif not include_archived:
         where.append("s.archived = 0")
+    # The archived-only view is the recovery surface for rows that dropped out of every default
+    # list: a session that is archived AND hidden (Bot Mode marks its sessions hidden) must still
+    # be reachable there, or nothing but direct DB access can bring it back (#90946).
+    if not include_hidden and not archived_only:
+        where.append("s.hidden = 0")
     return where, params
 
 
@@ -1361,15 +1368,9 @@ class SessionSessionsMixin:
         where_clauses, params = _session_filter_where(
             exclude_children=not include_children, source=source, sources=sources, session_key=session_key,
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
-            archived_only=archived_only, include_archived=include_archived, include_subagents=include_subagents,
-            local_created_sources=local_created_sources,
+            archived_only=archived_only, include_archived=include_archived, include_hidden=include_hidden,
+            include_subagents=include_subagents, local_created_sources=local_created_sources,
         )
-        # The archived-only view is the recovery surface for rows that dropped out of every
-        # default list: a session that is archived AND hidden (Bot Mode marks its sessions
-        # hidden) must still be reachable there, or nothing but direct DB access can bring
-        # it back (#90946).
-        if not include_hidden and not archived_only:
-            where_clauses.append("s.hidden = 0")
         heads = {}
         from hermes_state_local import exclude_superseded_segments
         if not include_children:
@@ -1446,10 +1447,9 @@ class SessionSessionsMixin:
                 exclude_children=not include_children, source=source, sources=sources,
                 session_key=session_key, exclude_sources=exclude_sources, cwd_prefix=cwd_prefix,
                 min_message_count=min_message_count, archived_only=False, include_archived=True,
-                include_subagents=include_subagents, local_created_sources=local_created_sources,
+                include_hidden=include_hidden, include_subagents=include_subagents,
+                local_created_sources=local_created_sources,
             )
-            if not include_hidden and not archived_only:
-                pinned_clauses.append("s.hidden = 0")
             if heads:
                 exclude_superseded_segments(self, pinned_clauses, pinned_params)
             pinned_clauses.append("s.pinned = 1")
@@ -1588,15 +1588,16 @@ class SessionSessionsMixin:
     def session_count(
         self, source: str | None = None, sources: list[str] | None = None, cwd_prefix: str | None = None,
         min_message_count: int = 0, include_archived: bool = False, archived_only: bool = False,
-        exclude_children: bool = False, exclude_sources: list[str] | None = None, include_subagents: bool = False,
-        local_created_sources: Sequence[str] | None = None,
+        exclude_children: bool = False, exclude_sources: list[str] | None = None, include_hidden: bool = False,
+        include_subagents: bool = False, local_created_sources: Sequence[str] | None = None,
     ) -> int:
-        """Count sessions with list_sessions_rich's filters so a paired "load more" total matches."""
+        """Count sessions with list_sessions_rich's filters so a paired "load more" total matches,
+        hidden rows included only with ``include_hidden`` (they are in no default listing)."""
         where_clauses, params = _session_filter_where(
             exclude_children=exclude_children, source=source, sources=sources,
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
-            archived_only=archived_only, include_archived=include_archived, include_subagents=include_subagents,
-            local_created_sources=local_created_sources,
+            archived_only=archived_only, include_archived=include_archived, include_hidden=include_hidden,
+            include_subagents=include_subagents, local_created_sources=local_created_sources,
         )
         if exclude_children:
             from hermes_state_local import exclude_superseded_segments
@@ -1609,12 +1610,13 @@ class SessionSessionsMixin:
 
     def session_count_by_source(
         self, *, include_archived: bool = False, archived_only: bool = False,
-        exclude_children: bool = False,
+        exclude_children: bool = False, include_hidden: bool = False,
     ) -> dict[str, int]:
-        """``{source: count}`` via one GROUP BY; ``exclude_children`` mirrors listing visibility."""
+        """``{source: count}`` via one GROUP BY; ``exclude_children`` and ``include_hidden`` mirror
+        listing visibility."""
         where_clauses, params = _session_filter_where(
             exclude_children=exclude_children, archived_only=archived_only,
-            include_archived=include_archived,
+            include_archived=include_archived, include_hidden=include_hidden,
         )
         if exclude_children:
             from hermes_state_local import exclude_superseded_segments
