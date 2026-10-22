@@ -26,19 +26,30 @@ Portal 代理了来自整个生态系统的精选 agentic 模型目录——统�
 
 | 系列 | 模型 |
 |--------|--------|
-| **Anthropic Claude** | Opus、Sonnet、Haiku（4.x 系列） |
-| **OpenAI** | GPT-5.4、o 系列推理模型 |
-| **Google Gemini** | 2.5 Pro、2.5 Flash |
-| **DeepSeek** | DeepSeek V3.2、DeepSeek-R1 |
-| **Qwen** | Qwen3 系列、Qwen Coder |
-| **Kimi / Moonshot** | Kimi-K2、Kimi-Latest |
-| **GLM / Zhipu** | GLM-4.6、GLM-4-Plus |
-| **MiniMax** | M2.7、M1 |
-| **xAI** | Grok-4、Grok-3 |
+| **Anthropic Claude** | Fable 5.1、Fable 5、Opus 5.5、Opus 5、Opus 4.8、Sonnet 5.5、Sonnet 5、Haiku 5.5、Haiku 4.5 |
+| **OpenAI** | GPT-6 Astra、GPT-6 Astra Pro、GPT-6.1 Sol、GPT-6.1 Sol Pro、GPT-6 Sol、GPT-6 Sol Pro、GPT-6 Luna、GPT-6 Luna Pro、GPT-5.5、GPT-5.5 Pro、GPT-5.4 Mini |
+| **Google Gemini** | Gemini 4 Argon、Gemini 3.1 Pro Preview、Gemini 3.8 Flash、Gemini 3.7 Flash |
+| **DeepSeek** | DeepSeek V4 Pro、DeepSeek V4.1 Flash |
+| **Qwen** | Qwen3.8-Max、Qwen3.8-Flash |
+| **Kimi / Moonshot** | Kimi K3 |
+| **GLM / Zhipu** | GLM-5.3、GLM-5.3 Flash、GLM-5.3 FlashX、GLM-5.2 |
+| **MiniMax** | MiniMax M3 |
+| **xAI** | Grok 4.7、Grok 4.6 |
+| **NVIDIA** | Nemotron-3 Super 120B-A12B |
+| **Tencent** | Hunyuan 4 Preview、Hunyuan 3 |
+| **Xiaomi** | MiMo V2.6 Pro、MiMo V2.6 Flash、MiMo V2.6 Pro Ultraspeed、MiMo V2.5 Pro |
+| **StepFun** | Step 3.7 Flash |
+| **Meta** | Muse Spark 1.3、Muse Spark 1.2 |
+| **Sakana** | Fugu Ultra |
+| **Upstage** | Solar Pro 4、Solar Mini 4 |
 | **Hermes** | Hermes-4-70B、Hermes-4-405B（对话，见[下方说明](#a-note-on-hermes-4)） |
-| **+ 其他所有模型** | 240+ 额外模型——完整的 agentic 前沿生态 |
+| **+ 其他所有模型** | 280+ 额外模型——完整的 agentic 前沿生态 |
 
-底层上，Portal 会为每个模型选择最合适的后端——部分模型通过 OpenRouter 路由，其他模型则通过专有或备用提供商，且某个模型的路由方式可能随时间调整。所有用量都统一计入你的 Nous 订阅。在会话中途用 `/model` 即可在 Claude Sonnet 4.6（适合代码）和 Gemini 2.5 Pro（适合长上下文）之间切换——无需新凭证，无需充值，不会遇到余额为零的意外报错。
+:::note
+上表中的每个模型都在 Hermes 随包提供的目录里——[`website/static/api/model-catalog.json`](https://github.com/NousResearch/hermes-agent/blob/main/website/static/api/model-catalog.json)，最近更新于 2026-10-17——该目录也正是填充 `/model` 选择器的内容，所以表里出现的名字都可以直接选到。表格本身是手工维护的；[模型目录](../reference/model-catalog.md)参考页和 `hermes model` 选择器才是实时列表。
+:::
+
+底层上，Portal 会为每个模型选择最合适的后端——部分模型通过 OpenRouter 路由，其他模型则通过专有或备用提供商，且某个模型的路由方式可能随时间调整。所有用量都统一计入你的 Nous 订阅。在会话中途用 `/model` 即可在 Claude Sonnet 5.5（适合代码）和 Gemini 4 Argon（适合长上下文）之间切换——无需新凭证，无需充值，不会遇到余额为零的意外报错。
 
 :::note
 由于路由是按模型进行的，并非总是经过 OpenRouter，OpenRouter 专有的请求扩展（如 `provider` 路由偏好、`session_id` 粘性路由或顶层 `cache_control`）不属于 Portal 的 API 契约，可能会被忽略，具体取决于该模型由哪个后端提供服务。
@@ -75,10 +86,10 @@ Nous Research 自家的 **Hermes 4** 系列（Hermes-4-70B、Hermes-4-405B）通
 但**不建议在 Hermes Agent 内部使用它们**。Hermes 4 针对对话和推理进行了调优，而非 agent 所依赖的高频工具调用循环。请将它们用于研究工作流，或通过[订阅代理](../user-guide/features/subscription-proxy.md)从其他工具调用——但在 agent 场景下，请从目录中选择前沿 agentic 模型：
 
 ```bash
-/model anthropic/claude-sonnet-4.6     # 最佳通用 agentic 模型
-/model openai/gpt-5.4                  # 强推理 + 工具调用
-/model google/gemini-2.5-pro           # 超大上下文窗口
-/model deepseek/deepseek-v3.2          # 高性价比代码模型
+/model anthropic/claude-sonnet-5.5     # 最佳通用 agentic 模型
+/model openai/gpt-6.1-sol              # 强推理 + 工具调用
+/model google/gemini-4-argon           # 超大上下文窗口
+/model deepseek/deepseek-v4.1-flash    # 高性价比代码模型
 ```
 
 Portal 自身的[模型信息页](https://portal.nousresearch.com/info)也有相同警告，因此这不是 Hermes 侧的主观意见——这是 Nous Research 的官方指导。
@@ -158,9 +169,9 @@ hermes portal open       # 在浏览器中打开订阅管理页面
 在会话中：
 
 ```bash
-/model anthropic/claude-sonnet-4.6
-/model openai/gpt-5.4
-/model google/gemini-2.5-pro
+/model anthropic/claude-sonnet-5.5
+/model openai/gpt-6.1-sol
+/model google/gemini-4-argon
 ```
 
 或打开选择器：
@@ -204,7 +215,7 @@ Tool Gateway 是按工具单独选择启用的，而非全部或全不。完整�
 ```yaml
 model:
   provider: nous
-  default: anthropic/claude-sonnet-4.6     # 或你选择的其他模型
+  default: anthropic/claude-sonnet-5.5     # 或你选择的其他模型
   base_url: https://inference.nousresearch.com/v1
 ```
 
@@ -253,7 +264,7 @@ hermes portal
 Portal 会为每个模型选择合适的后端——部分模型通过 OpenRouter 路由，其他模型则通过专有或备用提供商——因此 OpenRouter 支持的大多数模型通常都可用。如果某个模型未出现在 `/model` 中，可直接尝试 OpenRouter 风格的 slug：
 
 ```bash
-/model anthropic/claude-opus-4.6
+/model anthropic/claude-opus-5.5
 ```
 
 如果某个模型确实缺失，请[提交 issue](https://github.com/NousResearch/hermes-agent/issues)——我们将 Portal 目录同步至 Hermes，缺口通常意味着可以更新的路由配置。
