@@ -96,20 +96,37 @@ def list_context_file_sources(
     return sources
 
 
-def context_file_sources_for_agent(agent: Any) -> list[dict[str, Any]]:
+def context_file_sources_for_agent(agent: Any, cwd: Optional[str] = None) -> list[dict[str, Any]]:
     """The manifest for a live agent, resolved exactly like ``agent.system_prompt._context_files_part``
-    (session cwd, install-tree policy per platform, the agent's own profile home)."""
+    (session cwd, install-tree policy per platform, the agent's own profile home).
+
+    *cwd* overrides the resolved session cwd, because a workspace move has to ask what two DIFFERENT
+    directories would embed while the RPC thread performing it has no session cwd bound (#143204).
+    """
     if getattr(agent, "skip_context_files", False):
         return []
-    from agent.runtime_cwd import resolve_context_cwd
     from agent.system_prompt import _agent_home
-    launch_artifact = getattr(agent, "_context_cwd_is_launch_artifact", False)
-    cwd = resolve_context_cwd(include_session_override=not launch_artifact)
+    if cwd is None:
+        from agent.runtime_cwd import resolve_context_cwd
+        launch_artifact = getattr(agent, "_context_cwd_is_launch_artifact", False)
+        resolved = resolve_context_cwd(include_session_override=not launch_artifact)
+        cwd = str(resolved) if resolved is not None else None
     ctx_len = getattr(getattr(agent, "context_compressor", None), "context_length", None)
     return list_context_file_sources(
-        cwd=str(cwd) if cwd is not None else None, context_length=ctx_len if isinstance(ctx_len, int) else None,
+        cwd=cwd, context_length=ctx_len if isinstance(ctx_len, int) else None,
         allow_install_tree_fallback=getattr(agent, "platform", None) in ("cli", "tui"), home_override=_agent_home(agent),
     )
+
+
+def context_files_signature_for_agent(agent: Any, cwd: Optional[str] = None) -> tuple[str, ...]:
+    """Paths of the context files a prompt build at *cwd* would LOAD — the project-context input to the
+    system prompt, so two directories with the same signature render the same context tier.
+
+    A workspace move compares the cwd the cached prompt was built under against the new one and
+    invalidates that prompt only when this changes; an identical set keeps it (prefix-cache cost).
+    """
+    return tuple(str(src["path"]) for src in context_file_sources_for_agent(agent, cwd=cwd) if src["loaded"])
+
 
 
 def render_context_file_lines(sources: list[dict[str, Any]]) -> list[str]:

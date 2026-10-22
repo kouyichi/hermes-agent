@@ -6,11 +6,16 @@ install time (method_ctx.bind_module), so they reference server.py globals bare.
 from __future__ import annotations
 
 import contextlib
+import logging
 from typing import Any
 
 from tui_gateway import git_probe
 
 from .method_ctx import bind_module
+
+# Installed handlers resolve ``logger`` from server.py (every body is rebound onto its globals); this
+# module-level one keeps the helpers here runnable when a test drives them directly.
+logger = logging.getLogger(__name__)
 
 
 def _normalize_completion_path(path_part: str) -> str:
@@ -498,9 +503,13 @@ def _session_source(session: dict | None) -> str:
 def _register_session_cwd(session: dict | None) -> None:
     if not session:
         return
+    agent = session.get("agent")
+    # The cwd the cached prompt was built under; a move that changes it can change the project context.
+    prompt_cwd = str(getattr(agent, "session_cwd", None) or "")
     # Workspace moves must reach lazy/restarted runtimes, not just terminal tools.
-    # Do not reinitialize memory providers or invalidate the cached system prompt.
-    if hasattr(agent := session.get("agent"), "session_cwd"):
+    # Do not reinitialize memory providers; the cached prompt is rebuilt only when the moved-to
+    # directory loads a different set of context files (see _refresh_prompt_after_workspace_move).
+    if hasattr(agent, "session_cwd"):
         agent.session_cwd = session.get("cwd") or None
     # A session that adopted a real workspace out of a home-fallback cwd (#76902: the
     # packaged Desktop pins $HOME when no default project dir is configured) resumes
@@ -523,6 +532,37 @@ def _register_session_cwd(session: dict | None) -> None:
             if profile_home and hc.hermes_home_key(hc.get_hermes_home()) != hc.hermes_home_key(profile_home):
                 stack.callback(hc.reset_hermes_home_override, hc.set_hermes_home_override(str(profile_home)))
             register_task_env_overrides(session["session_key"], {"cwd": cwd, "cwd_source": cwd_source})
+    _refresh_prompt_after_workspace_move(agent, prompt_cwd, str(session.get("cwd") or ""))
+
+
+def _refresh_prompt_after_workspace_move(agent, prompt_cwd: str, cwd: str) -> None:
+    """Rebuild the cached system prompt when a workspace move changes the project context it embeds.
+
+    The context tier carries the .hermes.md/AGENTS.md chain discovered from the session cwd, so a moved
+    session kept answering under the previous project's instructions — silently, until something else
+    invalidated the prompt (#143204). Invalidating rebuilds it on the next turn through the same helper
+    /new, a session switch and a rewind use (the workspace snapshot re-probes at that rebuild).
+
+    Only a real change rebuilds: a move whose context-file set is identical (same repo, another
+    subdirectory) keeps the prompt, its prefix cache and the live memory providers untouched.
+    """
+    if agent is None or not prompt_cwd or not cwd or prompt_cwd == cwd:
+        return
+    if not getattr(agent, "_cached_system_prompt", None):
+        return  # nothing cached yet, so nothing stale
+    try:
+        from agent.context_file_sources import context_files_signature_for_agent
+        unchanged = (context_files_signature_for_agent(agent, cwd=prompt_cwd)
+                     == context_files_signature_for_agent(agent, cwd=cwd))
+    except Exception:
+        # Fail open: a comparison that cannot run must not cost the session its prompt.
+        logger.debug("workspace-move context-file comparison failed (cwd=%s)", cwd, exc_info=True)
+        return
+    if unchanged:
+        return
+    if callable(invalidate := getattr(agent, "_invalidate_system_prompt", None)):
+        invalidate()
+
 
 
 def _workdir_row_model_config(session: dict) -> tuple[str, dict]:
