@@ -8,6 +8,7 @@ import { Buffer } from 'buffer'
 
 import { PASTE_END, PASTE_START } from './termio/csi.js'
 import { createTokenizer, type Tokenizer } from './termio/tokenize.js'
+import { decodeWin32InputKeys } from './win32-input.js'
 
 // eslint-disable-next-line no-control-regex
 const META_KEY_CODE_RE = /^(?:\x1b)([a-zA-Z0-9])$/
@@ -318,18 +319,15 @@ export function parseMultipleKeypresses(
         // Sequences inside paste are treated as literal text
         pasteBuffer += token.value
       } else {
-        const response = parseTerminalResponse(token.value)
+        // win32-input-mode records (ConPTY DECSET 9001) are keys, not
+        // responses: a key-down yields one key per repeat, a key-up yields
+        // none. Anything else follows the response/mouse/keypress ladder.
+        const win32Keys = decodeWin32InputKeys(token.value)
 
-        if (response) {
-          keys.push({ kind: 'response', sequence: token.value, response })
+        if (win32Keys) {
+          keys.push(...win32Keys)
         } else {
-          const mouse = parseMouseEvent(token.value)
-
-          if (mouse) {
-            keys.push(mouse)
-          } else {
-            keys.push(parseKeypress(token.value))
-          }
+          keys.push(parseSequenceInput(token.value))
         }
       }
     } else if (token.type === 'text') {
@@ -690,6 +688,21 @@ function parseMouseEvent(s: string): ParsedMouse | null {
     row: parseInt(match[3]!, 10),
     sequence: s
   }
+}
+
+/**
+ * Interpret one non-paste sequence token: a terminal response, a mouse report,
+ * or a keypress. win32-input-mode records are handled by the caller, which can
+ * emit zero keys for a key-up.
+ */
+function parseSequenceInput(sequence: string): ParsedInput {
+  const response = parseTerminalResponse(sequence)
+
+  if (response) {
+    return { kind: 'response', sequence, response }
+  }
+
+  return parseMouseEvent(sequence) ?? parseKeypress(sequence)
 }
 
 function parseKeypress(s: string = ''): ParsedKey {
