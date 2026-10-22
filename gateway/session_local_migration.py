@@ -84,11 +84,18 @@ def legacy_launch_params(row):
     route = {key: value.strip() for key, value in route.items() if isinstance(value, str) and value.strip()}
     billing_base_url = row.get('billing_base_url')
     if 'base_url' not in route and isinstance(billing_base_url, str) and billing_base_url.strip():
-        route['base_url'] = billing_base_url.strip()
-        # The reader returns a bare ``custom`` billing provider with its endpoint and drops ``auto``:
-        # an endpoint left without a provider is a custom route, never one to pair with the
-        # profile's provider.
-        route.setdefault('provider', 'custom')
+        stamp = billing_base_url.strip()
+        # A usage stamp records which endpoint billed the last turn, and it is only a launch pin this
+        # surface can honour when it is an http(s) endpoint. An external-process provider declares its
+        # own transport ("process://<name>", "acp://<name>") and the stricter launch-override check
+        # refuses that as a base_url, so resurrecting it broke every resume on such a route; the row's
+        # provider name already restores it (#142779).
+        if stamp.lower().startswith(('http://', 'https://')):
+            route['base_url'] = stamp
+            # The reader returns a bare ``custom`` billing provider with its endpoint and drops ``auto``:
+            # an endpoint left without a provider is a custom route, never one to pair with the
+            # profile's provider.
+            route.setdefault('provider', 'custom')
     if row['source'] == 'acp' and 'cwd' not in params and Path(str(saved.get('cwd') or '')).is_absolute():
         params['cwd'] = saved['cwd']
     params.update({key: route[key] for key in ('provider', 'base_url') if key in route})
