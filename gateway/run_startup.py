@@ -1205,6 +1205,26 @@ class GatewayStartupMixin:
             if stuck:
                 logger.warning("Auto-suspended %d stuck-loop session(s)", stuck)
 
+    def _note_uncredentialed_platform(self, platform: Platform) -> None:
+        """Log why an enabled platform with no usable credential is not served, and stamp its row.
+
+        Nothing about this platform can heal without the operator (a pairing run, a token in .env),
+        so the gateway keeps running instead: cron and the local CLI sessions that depend on this
+        runtime are not this operator's messaging misconfiguration to lose (#142969).
+        """
+        if platform is Platform.WHATSAPP:
+            code = "whatsapp_unpaired"
+            message = ("WhatsApp is enabled but not paired; pair it with `hermes whatsapp`, or remove "
+                       "WHATSAPP_ENABLED from .env.")
+        else:
+            code = "credential_missing"
+            message = (f"{platform.value} is enabled but has no usable bot credential; add its token, or "
+                       "disable the platform.")
+        logger.warning("[%s] %s Not serving it; the gateway keeps running for cron and local sessions.",
+                       platform.value, message)
+        self._update_platform_runtime_status(platform.value, platform_state="disabled",
+                                             error_code=code, error_message=message)
+
     async def _start_prefilter_platforms(self) -> tuple[bool, int, list, list]:
         """Create + wire an adapter per enabled platform (no connects). Returns
         (aborted, enabled_platform_count, multiplex_skipped_platforms, pending_connects)."""
@@ -1225,13 +1245,20 @@ class GatewayStartupMixin:
             # reconnect loop that can never heal (#64674). Secondary profiles still start their own adapters
             # under _profile_runtime_scope with the real token -- skip the empty primary instead of failing
             # loudly.
-            if _multiplex_on and not _platform_has_bot_credential(platform, platform_config):
+            has_credential = _platform_has_bot_credential(platform, platform_config)
+            if _multiplex_on and not has_credential:
                 logger.info(
                     "Skipping %s on default profile: no bot credential in this "
                     "profile's secrets. Secondary multiplexed profiles that "
                     "provide the token will still connect.", platform.value,
                 )
                 _multiplex_skipped_platforms.append(platform)
+                continue
+            # Not multiplexed: nothing else can serve it, and connecting without a credential fails
+            # non-retryably (an unpaired WhatsApp, an empty token) — with nothing connected that ended
+            # startup at exit 78 and left every CLI session on `Gateway draining: not_ready`.
+            if not has_credential:
+                self._note_uncredentialed_platform(platform)
                 continue
             enabled_platform_count += 1
             adapter = self._create_adapter(platform, platform_config)
