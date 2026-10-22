@@ -514,9 +514,15 @@ def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | N
     """Task Scheduler XML with safe long-running defaults. ``launcher_path`` is the console-less
     ``.vbs`` run via ``wscript.exe`` (see ``_build_gateway_vbs_script`` for why not cmd.exe).
 
+    ``user`` fills both the principal and the logon trigger: a trigger with no ``<UserId>`` means
+    "at logon of *any* user", which Windows only lets an administrator register, so a standard
+    account could not recreate its own task (#143149). Element order inside the trigger follows the
+    schema's sequence — ``Enabled`` → ``UserId`` → ``Delay``.
+
     See #45599.
     """
     user_principal = f"\n      <UserId>{escape(user)}</UserId>" if user else ""
+    trigger_user = f"\n      <UserId>{escape(user)}</UserId>" if user else ""
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -524,7 +530,7 @@ def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | N
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
-      <Enabled>true</Enabled>
+      <Enabled>true</Enabled>{trigger_user}
       <Delay>{_TASK_LOGON_DELAY}</Delay>
     </LogonTrigger>
   </Triggers>
@@ -569,7 +575,12 @@ def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | N
 
 def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, str]:
     """Create or replace the Scheduled Task. Returns (success, detail). Always delete+create, never
-    ``/Change``: it preserves stale repeat/restart settings that relaunch the gateway every minute."""
+    ``/Change``: it preserves stale repeat/restart settings that relaunch the gateway every minute.
+
+    The delete makes the replace non-atomic, so the XML registered before it is exported first and
+    re-registered when ``/Create`` is refused: a standard account that cannot register the new
+    template keeps the autostart it already had instead of losing it (#143149)."""
+    previous_xml = _query_scheduled_task_xml(task_name)   # None when absent/unqueryable
     delete_code, delete_out, delete_err = _exec_schtasks(["/Delete", "/F", "/TN", task_name])
     delete_detail = (delete_err or delete_out or "").strip()
     if "cannot find" in delete_detail.lower():
@@ -585,12 +596,14 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
     base = ["/Create", "/F", "/TN", task_name, "/XML", str(xml_path)]
     variants = [[*base, "/RU", user, "/NP", "/IT"], base] if user else [base]
     last_code, last_err = 1, ""
+    restored = False
     try:
         for argv in variants:
             code, out, err = _exec_schtasks(argv)
             if code == 0:
                 return (True, f"Created Scheduled Task {task_name!r}")
             last_code, last_err = code, (err or out or "")
+        restored = bool(previous_xml) and _restore_scheduled_task(task_name, previous_xml, xml_path)
     finally:
         try:
             xml_path.unlink(missing_ok=True)
@@ -598,7 +611,34 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
             pass
     if delete_detail:
         last_err = f"{last_err.strip()} (delete detail: {delete_detail})"
-    return (False, f"schtasks /Create failed (code {last_code}): {last_err.strip()}")
+    if restored:
+        return (False, f"schtasks /Create failed (code {last_code}): {last_err.strip()} "
+                       "(the previous registration was restored)")
+    if previous_xml:
+        return (False, f"schtasks /Create failed (code {last_code}): {last_err.strip()} "
+                       "(the previous registration could not be restored — run hermes gateway install)")
+    return (False, f"schtasks /Create failed (code {last_code}): {last_err.strip()} "
+                   "(no previous registration to restore — run hermes gateway install)")
+
+
+def _restore_scheduled_task(task_name: str, previous_xml: str, xml_path: Path) -> bool:
+    """Re-register ``previous_xml`` (the export taken before the delete) after a refused create.
+
+    The account being restored was the one that registered that XML in the first place, so the same
+    rights are enough. A failure is logged rather than raised: the caller is already reporting the
+    refusal that made this necessary.
+    """
+    try:
+        xml_path.write_text(previous_xml, encoding="utf-16", newline="")
+        code, out, err = _exec_schtasks(["/Create", "/F", "/TN", task_name, "/XML", str(xml_path)])
+    except OSError as exc:
+        logger.warning("[gateway] could not restore the previous Scheduled Task %r: %s", task_name, exc)
+        return False
+    if code != 0:
+        logger.warning("[gateway] restoring the previous Scheduled Task %r was refused: %s",
+                       task_name, (err or out).strip())
+        return False
+    return True
 
 
 def _install_startup_entry(script_path: Path) -> Path:

@@ -334,6 +334,8 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
 
     def fake_schtasks(args):
         calls.append(tuple(args))
+        if args[0] == "/Query":   # the pre-delete export of the registration to restore
+            return (1, "", "ERROR: The system cannot find the file specified.")
         if args[0] == "/Delete":
             return (0, "SUCCESS", "")
         if args[0] == "/Create":
@@ -347,10 +349,10 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
 
     assert ok is True
     assert "/Change" not in [arg for call in calls for arg in call]
-    assert calls[0][:4] == ("/Delete", "/F", "/TN", "Hermes_Gateway_alice")
-    assert calls[1][0] == "/Create"
-    assert "/XML" in calls[1]
-    assert "/SC" not in calls[1]
+    assert calls[1][:4] == ("/Delete", "/F", "/TN", "Hermes_Gateway_alice")
+    assert calls[2][0] == "/Create"
+    assert "/XML" in calls[2]
+    assert "/SC" not in calls[2]
     assert "<Delay>PT30S</Delay>" in xml_seen["text"]
     assert "<StartWhenAvailable>true</StartWhenAvailable>" in xml_seen["text"]
     assert "<StopOnIdleEnd>false</StopOnIdleEnd>" in xml_seen["text"]
