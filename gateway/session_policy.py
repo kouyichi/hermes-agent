@@ -76,6 +76,11 @@ _TURN_PROFILE: ContextVar = ContextVar('follow_profile_read', default=None)  # (
 # ``oneshot`` (finite ``chat -q`` / ``-z`` runs) run as the CLI but keep their own stored label, so human
 # pickers hide them (INTERNAL_LISTING_SOURCES).
 SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop', 'acp': 'acp', 'tool': 'cli', 'oneshot': 'cli'}
+# A create may name a surface by either name of its pair: ``--source desktop`` is the gui surface's
+# other name (``SURFACE_GROUPS`` already filters the two as one conversation, and the Desktop app's own
+# rows are the ones carrying ``created_source='desktop'``). Resolved before validation, so the policy,
+# the stored row and ``SURFACES[source]`` all see ``gui``.
+SURFACE_ALIASES = {'desktop': 'gui'}
 # ``tool`` and ``oneshot`` stay stored under their own labels so pickers can hide them.
 # Every other creation label is rewritten to ``source='local'`` on peer refresh.
 _KEEP_STORED_LABEL = frozenset({'tool', 'oneshot'})
@@ -412,6 +417,7 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
     from hermes_constants import get_hermes_home
 
     source = params.get('source', 'cli')
+    source = SURFACE_ALIASES.get(source, source) if isinstance(source, str) else source
     if source == 'a2a':
         from gateway.session_a2a import build_forward_policy
         return build_forward_policy(params, config, private_secrets=private_secrets)

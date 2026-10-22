@@ -20,7 +20,9 @@ class CanonicalSessionParams(ProfileParams):
 
 class CanonicalCreateParams(ProfileParams):
     request_id: str | None = None
-    source: Literal['cli', 'tui', 'gui', 'acp', 'tool', 'oneshot'] = 'cli'
+    # ``desktop`` is the gui surface's other name (``gateway.session_policy.SURFACE_ALIASES``): the
+    # label the Desktop app's own rows carry, so a create may name either.
+    source: Literal['cli', 'tui', 'gui', 'desktop', 'acp', 'tool', 'oneshot'] = 'cli'
     cwd: str | None = None
     # The sessions-row ``cwd`` when it differs from the execution ``cwd`` (the classic CLI records
     # main's stamp: the launch dir, ``""`` = none); ``cwd`` stays where the tools run.
