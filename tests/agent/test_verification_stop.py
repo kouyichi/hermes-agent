@@ -95,16 +95,18 @@ def test_nudge_checks_all_edited_workspaces(tmp_path, monkeypatch):
     assert changed_b in nudge
 
 @pytest.mark.platforms("posix")  # Symlinks require elevated privileges on Windows
-def test_no_suite_nudge_uses_canonical_temp_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+def test_no_suite_nudge_uses_the_managed_scratch_dir(tmp_path, monkeypatch):
+    """The no-suite instruction names the profile's managed scratch dir — the location the host
+    prompt sends temporary probes to — and canonicalises it, so a home reached through a symlink
+    names its target (#142843)."""
+    real_home = tmp_path / "real-home"
+    (real_home / "cache" / "scratch").mkdir(parents=True)
+    linked_home = tmp_path / "linked-home"
+    linked_home.symlink_to(real_home, target_is_directory=True)
+    monkeypatch.setenv("HERMES_HOME", str(linked_home))
     project = tmp_path / "project"
     project.mkdir()
     (project / "package.json").write_text("{}", encoding="utf-8")
-    real_temp = tmp_path / "real-temp"
-    real_temp.mkdir()
-    linked_temp = tmp_path / "linked-temp"
-    linked_temp.symlink_to(real_temp, target_is_directory=True)
-    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(linked_temp))
 
     nudge = build_verify_on_stop_nudge(
         session_id="s1",
@@ -112,8 +114,36 @@ def test_no_suite_nudge_uses_canonical_temp_dir(tmp_path, monkeypatch):
     )
 
     assert nudge is not None
-    assert str(real_temp) in nudge
-    assert str(linked_temp) not in nudge
+    assert str(real_home / "cache" / "scratch") in nudge
+    assert str(linked_home / "cache" / "scratch") not in nudge
+
+def test_ad_hoc_pass_under_managed_scratch_satisfies_no_suite_stop_loop(tmp_path, monkeypatch):
+    """A check written where the host prompt asks for it (managed scratch) is verification
+    evidence, even when the process temp root is a different directory — the Windows/macOS
+    shape, where a user- or OS-set TEMP/TMPDIR wins (#142843)."""
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(os_temp))
+    script = home / "cache" / "scratch" / f"hermes-verify-{tmp_path.name}.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    record_terminal_result(
+        command=f"python {script}",
+        cwd=project,
+        session_id="s1",
+        exit_code=0,
+        output="ok",
+    )
+
+    assert build_verify_on_stop_nudge(
+        session_id="s1", changed_paths=[str(project / "src" / "app.ts")]
+    ) is None
 
 def test_ad_hoc_pass_satisfies_no_suite_stop_loop(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))

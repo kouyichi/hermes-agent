@@ -480,3 +480,59 @@ def test_windows_backslash_ad_hoc_script_path_is_matched(tmp_path, monkeypatch):
     assert result is not None, (
         "Windows backslash path should be matched via posix=False fallback"
     )
+
+
+def _diverged_roots(tmp_path, monkeypatch):
+    """``(scratch_dir, temp_root, project)`` with the temp root NOT under the scratch dir — the
+    Windows/macOS shape, where a user- or OS-set TEMP/TMPDIR wins over the managed one."""
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    temp_root = tmp_path / "os-temp"
+    temp_root.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp_root))
+    project = tmp_path / "project"
+    project.mkdir()
+    return home / "cache" / "scratch", temp_root, project
+
+
+def test_ad_hoc_roots_name_the_managed_scratch_dir_first(tmp_path, monkeypatch):
+    """The instruction's root is the scratch dir the host prompt sends work to; the temp root is
+    only a second accepted location (#142843)."""
+    from agent.verification_evidence import ad_hoc_verify_roots
+
+    scratch, temp_root, _project = _diverged_roots(tmp_path, monkeypatch)
+
+    roots = ad_hoc_verify_roots()
+    assert roots[0] == Path(str(scratch)).resolve()
+    assert Path(str(temp_root)).resolve() in roots
+
+
+def test_ad_hoc_roots_collapse_to_one_when_temp_is_the_scratch_dir(tmp_path, monkeypatch):
+    """On Linux ``TMPDIR`` points at the scratch dir, so both candidates are the same root."""
+    from agent.verification_evidence import ad_hoc_verify_roots
+
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    scratch = home / "cache" / "scratch"
+    scratch.mkdir(parents=True)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(scratch))
+
+    assert ad_hoc_verify_roots() == (Path(str(scratch)).resolve(),)
+
+
+def test_scratch_script_classifies_but_a_foreign_dir_does_not(tmp_path, monkeypatch):
+    """A successful check under managed scratch is ad-hoc evidence; one outside every allowed
+    root is not, and a script inside the project is still rejected."""
+    from agent.verification_evidence import _is_temp_script_path
+
+    scratch, temp_root, project = _diverged_roots(tmp_path, monkeypatch)
+    foreign = tmp_path / "elsewhere"
+    foreign.mkdir()
+
+    assert _is_temp_script_path(str(scratch / "hermes-verify-a.py"), project) is True
+    assert _is_temp_script_path(str(temp_root / "hermes-verify-a.py"), project) is True
+    assert _is_temp_script_path(str(foreign / "hermes-verify-a.py"), project) is False
+    assert _is_temp_script_path(str(project / "hermes-verify-a.py"), project) is False
+    # Outside the allowed roots, the prefix alone is never enough.
+    assert _is_temp_script_path(str(foreign / "probe.py"), project) is False
+

@@ -206,10 +206,16 @@ def build_verify_on_stop_nudge(
             "Read any failure, repair the code, and summarize what passed."
         )
     else:
-        temp_dir = os.path.realpath(tempfile.gettempdir())
+        from agent.verification_evidence import ad_hoc_verify_roots
+
+        # Name the root the host prompt already sends temporary work to (managed scratch): the
+        # process temp root is a different directory whenever a user- or OS-set TMPDIR/TEMP wins,
+        # and instructing one while accepting only the other left the agent in a loop (#142843).
+        roots = ad_hoc_verify_roots()
+        verify_root = str(roots[0]) if roots else os.path.realpath(tempfile.gettempdir())
         command_instruction = (
             "No canonical test/lint/build command was detected. Create a focused "
-            f"temporary verification script under `{temp_dir}` using an OS-safe "
+            f"temporary verification script under `{verify_root}` using an OS-safe "
             "`tempfile` path with a `hermes-verify-` filename prefix, run it "
             "against the changed behavior, clean it up when possible, and "
             "summarize it explicitly as ad-hoc verification rather than suite "

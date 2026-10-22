@@ -5,6 +5,7 @@ completion, and never upgrades targeted checks into "repo green"."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sqlite3
@@ -15,7 +16,7 @@ from datetime import datetime, timedelta, timezone, UTC
 from pathlib import Path
 from typing import Any, Optional
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_scratch_dir
 
 
 _DB_LOCK = threading.Lock()
@@ -302,13 +303,47 @@ def _is_under(token: str, base: str | Path | None) -> bool:
         return False
 
 
+def ad_hoc_verify_roots() -> tuple[Path, ...]:
+    """Where an ad-hoc ``hermes-verify-*`` script may live, most-preferred first.
+
+    The host prompt sends temporary work to the profile's managed scratch dir
+    (``<HERMES_HOME>/cache/scratch``) and says not to use the system temp dir, but
+    ``apply_scratch_tmp_env`` deliberately keeps a user- or OS-set ``TMPDIR``/``TEMP``/``TMP``
+    (Windows ``%TEMP%``, macOS ``/var/folders``), so the process temp root is a DIFFERENT
+    directory on those hosts. Recognising only the temp root meant a check written exactly
+    where the prompt asks ran green and classified as nothing, and the next nudge asked for it
+    again under the temp root (#142843). Both roots stay accepted: a caller that followed the
+    nudge's own ``tempfile`` instruction must not lose its evidence either.
+    """
+    roots: list[Path] = []
+    try:
+        roots.append(get_scratch_dir(get_hermes_home(), prune=False))
+    except (OSError, RuntimeError):
+        pass  # no resolvable home (a child env built from nothing) leaves the temp root only
+    try:
+        roots.append(Path(tempfile.gettempdir()))
+    except OSError:
+        pass
+    # Canonical, because ``_is_under`` and the nudge both compare real paths; a temp var that
+    # names the scratch dir through a symlink must not count as a second root.
+    unique: dict[str, Path] = {}
+    for root in roots:
+        resolved = Path(os.path.realpath(root))
+        unique.setdefault(str(resolved), resolved)
+    return tuple(unique.values())
+
+
 def _is_temp_script_path(token: str, root: str | Path | None) -> bool:
-    """An ad-hoc verify script: prefixed name, under the temp dir, outside the repo."""
+    """An ad-hoc verify script: prefixed name, under an allowed verification root, outside the repo."""
     try:
         name = Path(token).expanduser().name
     except Exception:
         return False
-    return name.startswith(_AD_HOC_SCRIPT_NAME_PREFIXES) and _is_under(token, tempfile.gettempdir()) and not _is_under(token, root)
+    return (
+        name.startswith(_AD_HOC_SCRIPT_NAME_PREFIXES)
+        and any(_is_under(token, allowed) for allowed in ad_hoc_verify_roots())
+        and not _is_under(token, root)
+    )
 
 
 def _is_interpreter_token(token: str) -> bool:
