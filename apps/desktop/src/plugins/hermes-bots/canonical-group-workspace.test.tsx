@@ -199,3 +199,56 @@ it('shows which bots are working, and still says the group is working on a gatew
   render(<CanonicalGroupWorkspace binding={{ connectionId: 'local', profile: 'team', roomId: 'older' }} />)
   await waitFor(() => expect(screen.getByRole('status').textContent).toBe('The group is working…'))
 })
+
+it('keeps the restored-send notice off a normal in-flight send (#143285)', async () => {
+  let releaseSend!: () => void
+  request.mockImplementation(async (_route, method) => {
+    if (method === 'groups.state') {return { room: { name: 'Room' }, driver_status: {} }}
+
+    if (method === 'groups.log') {return { events: [] }}
+
+    if (method === 'groups.send') {
+      await new Promise<void>(resolve => { releaseSend = resolve })
+
+      return {}
+    }
+
+    return {}
+  })
+  const notice = 'An unconfirmed send was restored. Retry it before sending another message.'
+  render(<CanonicalGroupWorkspace binding={{ connectionId: 'remote', profile: 'team', roomId: 'fresh-send' }} />)
+  await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).disabled).toBe(false))
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'first message' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+  await waitFor(() => expect(request.mock.calls.some(c => c[1] === 'groups.send')).toBe(true))
+  // Nothing was recovered from the journal, so neither the notice nor a Retry label belongs here.
+  expect(screen.queryByText(notice)).toBeNull()
+  expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true)
+  releaseSend()
+  await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(''))
+  expect(screen.queryByText(notice)).toBeNull()
+})
+
+it('keeps the restored-send notice until the recovered intent is retired', async () => {
+  const binding = { connectionId: 'remote', profile: 'team', roomId: 'recovered-notice' }
+  await prepareCanonicalGroupSend(binding, { text: 'recovered text' })
+  const notice = 'An unconfirmed send was restored. Retry it before sending another message.'
+  request.mockImplementation(async (_route, method) => {
+    if (method === 'groups.state') {return { room: { name: 'Room' }, driver_status: {} }}
+
+    if (method === 'groups.log') {return { events: [] }}
+
+    if (method === 'groups.send') {throw new Error('lost ACK')}
+
+    return {}
+  })
+  render(<CanonicalGroupWorkspace binding={binding} />)
+  await screen.findByText(notice)
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+  request.mockImplementation(async (_route, method) => method === 'groups.state'
+    ? { room: { name: 'Room' }, driver_status: {} } : method === 'groups.log' ? { events: [] } : {})
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  await waitFor(async () => expect(await readCanonicalGroupSend(binding)).toBeUndefined())
+  await waitFor(() => expect(screen.queryByText(notice)).toBeNull())
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true))
+})

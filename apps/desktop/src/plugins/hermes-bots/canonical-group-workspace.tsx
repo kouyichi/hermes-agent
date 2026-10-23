@@ -38,6 +38,9 @@ function CanonicalRoomView({ binding: initialBinding, visible, onBack }: {
   const [uploading, setUploading] = useState(false)
   const [restored, setRestored] = useState(false)
   const [pending, setPending] = useState<PreparedCanonicalGroupSend | null>(null)
+  // The journal-recovered intent only: `pending` also holds every in-flight send, whose state must
+  // not claim a send was "restored" or relabel Send as Retry (#143285).
+  const [recovered, setRecovered] = useState<PreparedCanonicalGroupSend | null>(null)
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
   const alive = useRef(true)
@@ -55,6 +58,7 @@ function CanonicalRoomView({ binding: initialBinding, visible, onBack }: {
 
       if (entry) {
         setPending(entry)
+        setRecovered(entry)
         setDraft(String(entry.params.payload.text ?? ''))
         setAttachments((entry.params.payload.attachments as Attachment[] | undefined) ?? [])
       }
@@ -146,6 +150,7 @@ function CanonicalRoomView({ binding: initialBinding, visible, onBack }: {
         const held = heldDraft.current
         heldDraft.current = null
         setPending(null)
+        setRecovered(null)
         setDraft(held?.text ?? '')
         setAttachments(held?.attachments ?? [])
       }
@@ -185,11 +190,11 @@ function CanonicalRoomView({ binding: initialBinding, visible, onBack }: {
       <Button disabled={busy} onClick={() => { const exact = discard; setDiscard(null); void act(exact) }}>{labels.confirmDiscard}</Button>
       <Button onClick={() => setDiscard(null)}>{labels.cancel}</Button>
     </div>}
-    {pending && <p role="status">{labels.restoredPendingSend}</p>}
+    {recovered && <p role="status">{labels.restoredPendingSend}</p>}
     <form className="flex gap-2" onSubmit={event => { event.preventDefault(); send() }}>
       <CanonicalGroupAttachments attachments={attachments} binding={binding} disabled={composerLocked} onChange={setAttachments} onUploadingChange={setUploading} />
       <Textarea aria-label={labels.groupMessage} className="min-w-0 flex-1" disabled={composerLocked} onChange={e => setDraft(e.target.value)} value={draft} />
-      <Button disabled={!restored || busy || uploading || (!pending && !draft.trim() && !attachments.length) || !state?.driver_status} type="submit">{pending ? labels.retry : labels.send}</Button>
+      <Button disabled={!restored || busy || uploading || (!pending && !draft.trim() && !attachments.length) || !state?.driver_status} type="submit">{recovered ? labels.retry : labels.send}</Button>
     </form>
   </section>
 }
