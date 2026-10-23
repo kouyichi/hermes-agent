@@ -193,7 +193,9 @@ def _create_chromium_session(cache_key: str) -> dict[str, Any]:
         # ever falls back to a host browser.
         where = runtime.tool_placement()
     except RuntimeError as exc:
-        raise RuntimeError(f"The browser cannot run here: {exc}") from exc
+        # Keep a policy refusal typed: its callers must not offer browser-install advice for it (#143723).
+        refused = placement.PlacementRefused if isinstance(exc, placement.PlacementRefused) else RuntimeError
+        raise refused(f"The browser cannot run here: {exc}") from exc
     if where == placement.TERMINAL:
         from tools.browser_session_sandbox import create_sandbox_session
         return create_sandbox_session(cache_key)

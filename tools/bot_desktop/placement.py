@@ -29,6 +29,17 @@ REFUSED = "refused"
 _STREAM_BACKENDS = ("docker", "ssh")
 
 
+class PlacementRefused(RuntimeError):
+    """The placement policy forbids running the desktop (screen, browser, cua-driver) here.
+
+    A refusal is configuration, not a broken install: no browser binary, engine or
+    reinstall can fix it, and its reason already names the configuration that forbids
+    the action plus the explicit opt-in that would allow it. Callers that turn a start
+    failure into advice branch on this type so they never append install steps (#143723);
+    it subclasses ``RuntimeError`` so existing ``except RuntimeError`` sites keep working.
+    """
+
+
 @dataclass(frozen=True)
 class Placement:
     where: str            # GATEWAY | TERMINAL | REFUSED

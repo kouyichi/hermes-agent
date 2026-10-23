@@ -391,7 +391,7 @@ def tool_placement() -> str:
     agent's browser outside the sandbox the user chose."""
     where = placement.resolve()
     if where.where == placement.REFUSED:
-        raise RuntimeError(where.reason)
+        raise placement.PlacementRefused(where.reason)
     if where.where == placement.GATEWAY:
         return placement.GATEWAY
     if not sandbox_screen_running() or not published_env().get("DISPLAY"):
@@ -665,7 +665,7 @@ def start(*, wait_seconds: float = 15.0) -> DesktopStatus:
     Holding it for the whole Xfce bring-up serialized every profile's start behind one desktop launch."""
     where = placement.resolve()
     if where.where == placement.REFUSED:
-        raise RuntimeError(where.reason)
+        raise placement.PlacementRefused(where.reason)
     if where.where == placement.TERMINAL:
         return _start_in_sandbox(wait_seconds)
     if not is_supported_host():

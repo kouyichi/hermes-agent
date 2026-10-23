@@ -363,6 +363,26 @@ def _mark_local_browser(env: dict, session: dict, key: str) -> None:
     _export_real_profile_note(env, key)
 
 
+def _local_browser_failure(exc: Exception, *, lightpanda: bool) -> str:
+    """Why the local browser could not be started, with the advice that fits THAT cause.
+
+    A placement refusal (``tools.bot_desktop.placement.PlacementRefused``) is configuration:
+    it names the setting that forbids a browser here and the explicit opt-in that allows it,
+    so no engine switch or Chromium reinstall can clear it. Its reason is returned verbatim
+    rather than carrying install steps the reader cannot act on (#143723). Every other
+    failure keeps the install advice, which is what a genuinely broken install needs.
+    """
+    from tools.bot_desktop.placement import PlacementRefused
+
+    if isinstance(exc, PlacementRefused):
+        return str(exc)
+    if lightpanda:
+        return (f"Lightpanda could not be started: {exc} Set browser.engine to auto "
+                "to use local Chrome, or switch backends via `hermes tools` → Browser Automation.")
+    return (f"The local browser could not be started: {exc} "
+            "Run `hermes tools` → Browser Automation to (re)install Chromium, or switch backends.")
+
+
 def _resolve_local_cdp(env: dict, task_id: Optional[str], session_name: str = "",
                        sidecar: bool = False) -> Optional[str]:
     """Local browser for this cache key through the session layer: the consented real profile, Lightpanda
@@ -377,12 +397,8 @@ def _resolve_local_cdp(env: dict, task_id: Optional[str], session_name: str = ""
         session.update(get_session_info(cache_key) or {})
         return session
 
-    if _quiet(using_lightpanda_engine, False):
-        fail = lambda e: (f"Lightpanda could not be started: {e} Set browser.engine to auto "
-                          "to use local Chrome, or switch backends via `hermes tools` → Browser Automation.")
-    else:
-        fail = lambda e: (f"The local browser could not be started: {e} "
-                          "Run `hermes tools` → Browser Automation to (re)install Chromium, or switch backends.")
+    lightpanda = _quiet(using_lightpanda_engine, False)
+    fail = lambda e: _local_browser_failure(e, lightpanda=lightpanda)
     err = _export_session_cdp(env, _session_info, key, fail, "The local browser session returned no CDP endpoint.")
     if err is None:
         _mark_local_browser(env, session, key)
