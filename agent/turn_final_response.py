@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 from agent.message_metadata import append_message
 from agent.reasoning_promotion import answer_in_reasoning_capability
 from agent.repetition_guard import STOP_PATH_MIN_CHARS, is_runaway_repetition
+from agent.turn_dropped_toolcall import dropped_toolcall_reenter
 from agent.turn_failure_copy import stamp_failure
 from agent.turn_empty_response import recover_empty_response
 from agent.turn_stop_gates import apply_stop_gates
@@ -31,7 +32,6 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_thinking_prefill", "_empty_recovery_synthetic", "_empty_terminal_sentinel",
     "_dropped_toolcall_nudge",
 )
-
 
 @dataclass
 class FinalResponseVerdict:
@@ -67,8 +67,7 @@ def finish_text_response(
     iteration-limit summarization; the final message is appended and flushed only after the
     stop gates accept it."""
     from agent.conversation_loop import (
-        _CODEX_ACK_CONTINUATION_NUDGE, _DEGENERATE_FINAL_NUDGE, _DROPPED_TOOLCALL_NUDGE_CONTENT,
-        _join_truncated_parts
+        _CODEX_ACK_CONTINUATION_NUDGE, _DEGENERATE_FINAL_NUDGE, _join_truncated_parts
     )
 
     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> FinalResponseVerdict:
@@ -287,33 +286,12 @@ def finish_text_response(
         final_msg["api_content"] = final_response
 
     # Dropped tool-call recovery (copilot/Claude): finish_reason="tool_calls" with empty
-    # tool_calls would end the turn unstarted; re-prompt (max 3 CONSECUTIVE stalls).
+    # tool_calls would end the turn unstarted; the sibling module owns the two budgets.
     if (
         finish_reason == "tool_calls"
         and not assistant_message.tool_calls
-        and getattr(agent, "_dropped_toolcall_retries", 0) < 3
+        and dropped_toolcall_reenter(agent, messages, final_msg)
     ):
-        agent._dropped_toolcall_retries = getattr(agent, "_dropped_toolcall_retries", 0) + 1
-        logger.warning(
-            "finish_reason=tool_calls with empty tool_calls array "
-            "(narration only) — re-prompting to emit the call "
-            "(retry %d/3, model=%s provider=%s)",
-            agent._dropped_toolcall_retries, agent.model, agent.provider,
-        )
-        agent._emit_diagnostic_status(
-            "↻ Model signaled a tool call but sent none — "
-            f"re-prompting ({agent._dropped_toolcall_retries}/3)"
-        )
-        # Both halves of the re-prompt pair are ephemeral scaffolding: never persisted,
-        # and the finalization pop strips an unanswered tail pair.
-        final_msg["_dropped_toolcall_nudge"] = True
-        append_message(messages, final_msg)
-        append_message(messages, {
-            "role": "user",
-            "content": _DROPPED_TOOLCALL_NUDGE_CONTENT,
-            "_dropped_toolcall_nudge": True,
-        })
-        agent._session_messages = messages
         final_response = None
         return _verdict("continue")
 

@@ -1707,6 +1707,9 @@ def _run_conversation_turn(
     agent._ephemeral_reasoning_off = False
     agent._auth_pool_refresh_counts = {}
     agent._last_turn_usage = None
+    # Dropped-tool-call recovery is bounded per turn: the CONSECUTIVE budget below is
+    # refreshed by every landed tool round, so a turn needs its own ceiling (#143040).
+    agent._dropped_toolcall_nudges = 0
 
     s = _LoopState(
         system_message=system_message, moa_config=moa_config,

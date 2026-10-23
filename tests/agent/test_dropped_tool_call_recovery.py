@@ -192,3 +192,44 @@ class TestDroppedToolCallRecovery:
             "ephemeral scaffolding so they are never persisted."
         )
 
+    def test_consecutive_budget_resets_cannot_refill_the_per_turn_budget(self, loop_agent):
+        """A landed tool call resets the CONSECUTIVE stall budget, so a model that
+        fabricates one no-effect call per narration used to be re-prompted without
+        end (#143040: 109 API calls in one turn, nothing delivered).
+
+        The reset is what a real tool round does (``turn_tool_round`` clears
+        ``_dropped_toolcall_retries`` after a landed call); it is applied here
+        between stubs so the invariant under test — a reset must not refill the
+        PER-TURN budget — is exercised without executing a tool."""
+        from tests.agent.test_run_agent import _mock_response
+
+        stubs = [_dropped_tool_call_response(f"Waiting for your review (stall {n}).") for n in range(10)]
+        stubs.append(_mock_response(content="done", finish_reason="stop"))
+        served = {"n": 0}
+
+        def _reset_then_answer(*_args, **_kwargs):
+            if served["n"]:
+                # Exactly what a landed tool round does to the consecutive budget.
+                loop_agent._dropped_toolcall_retries = 0
+            stub = stubs[min(served["n"], len(stubs) - 1)]
+            served["n"] += 1
+            return stub
+
+        loop_agent.client.chat.completions.create.side_effect = _reset_then_answer
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("review the PR")
+
+        calls = loop_agent.client.chat.completions.create.call_count
+        assert calls <= 8, (
+            "A reset of the consecutive budget must not re-open the dropped-tool-call "
+            f"re-prompt forever: {calls} API calls for 10 stalls in one turn."
+        )
+        assert "Waiting for your review" in (result["final_response"] or ""), (
+            "Once the per-turn recovery budget is spent the model's own text must be "
+            "delivered as the answer instead of another nudge."
+        )
