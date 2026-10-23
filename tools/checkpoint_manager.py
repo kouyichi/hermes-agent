@@ -64,6 +64,7 @@ from hermes_cli.gitlock import clear_stale_tmp_packs
 from typing import Dict, List, Optional, Set, Tuple
 
 from utils import env_int, rmtree_readonly
+from tools.checkpoint_paths import os_root_reason
 
 logger = logging.getLogger(__name__)
 
@@ -1418,6 +1419,13 @@ class CheckpointManager:
     def _take(self, working_dir: str, reason: str, *, prune: bool = True) -> bool:
         """Take a snapshot.  Returns True on success."""
         store = _store_path()
+
+        # An OS tree is never a workspace: snapshotting it indexes the system's own files and
+        # persists a project the store can never use (#143481).
+        refusal = os_root_reason(working_dir)
+        if refusal:
+            logger.debug("Checkpoint skipped: %s is %s", working_dir, refusal)
+            return False
 
         err = _init_store(store, working_dir)
         if err:

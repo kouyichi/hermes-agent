@@ -10,7 +10,7 @@ import pytest
 from agent.tool_executor import _ToolCallRef, _begin_tool_execution, _ensure_file_checkpoint
 from agent.turn_explainers import TurnExplainersMixin
 from tools.checkpoint_manager import CheckpointManager
-from tools.terminal_tool import _active_environments, _env_lock
+from tools.terminal_tool import _active_environments, _env_lock, clear_session_cwd, record_session_cwd
 
 
 @pytest.fixture
@@ -64,6 +64,38 @@ def test_relative_file_checkpoint_uses_task_workspace(tmp_path, monkeypatch):
 
     assert manager.list_checkpoints(str(workspace_cwd))
     assert manager.list_checkpoints(str(process_cwd)) == []
+
+
+def test_destructive_terminal_checkpoint_uses_the_session_cwd(tmp_path, monkeypatch, manager):
+    """No ``workdir`` and no ``$TERMINAL_CWD``: the snapshot covers the directory the command runs
+    in (the session's recorded cwd), not the one the process was launched from — a Windows desktop
+    launch inherits ``C:\\Windows\\System32`` as that launch directory (#143481)."""
+    launch_dir = tmp_path / "launch-dir"
+    session_dir = tmp_path / "workspace"
+    for directory in (launch_dir, session_dir):
+        directory.mkdir()
+        (directory / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    task_id = f"session-cwd-{tmp_path.name}"
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    monkeypatch.chdir(launch_dir)
+    record_session_cwd(task_id, str(session_dir))
+    try:
+        agent = SimpleNamespace(
+            _checkpoint_mgr=manager, quiet_mode=True, tool_progress_callback=None,
+            tool_start_callback=None, verbose_logging=False, log_prefix_chars=100,
+            _touch_activity=lambda *_: None,
+        )
+        _begin_tool_execution(
+            agent,
+            _ToolCallRef("terminal", {"command": "rm -rf build"}, task_id, "call-1", []),
+            None,
+        )
+    finally:
+        clear_session_cwd(task_id)
+
+    assert manager.list_checkpoints(str(session_dir))
+    assert manager.list_checkpoints(str(launch_dir)) == []
 
 
 def test_container_backend_task_leaves_host_store_untouched(tmp_path, manager, container_task_id):
