@@ -48,7 +48,6 @@ import {
   canonicalGroupBindingFor,
   canonicalGroupKeyRoute,
   publishCanonicalGroup,
-  registerCanonicalGroup,
   resolveCanonicalGroup
 } from './canonical-group-registry'
 import { CanonicalGroupWorkspace } from './canonical-group-workspace'
@@ -688,9 +687,13 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
       }
 
       setBusy(true)
+      // #143241: publish the new room under THIS tab's name, exactly as the name
+      // lookup above does. Binding the `canonical:` key alone left every name tab
+      // on a stale `missing` lookup, so its gate stayed armed and a second click
+      // minted a second room. This tab turns into the room instead of a second tab.
       void createCanonicalGroup(route, props.group, props.members)
         .then(({ room }) => {
-          if (sourceCurrent()) {openGroupChat(registerCanonicalGroup(route, room), 'key')}
+          if (sourceCurrent()) {publishCanonicalGroup(route, props.group, { authority: route, room }, props.origin ?? 'name')}
         })
         .catch(e => { if (sourceCurrent()) {setError(String(e))} }).finally(() => setBusy(false))
     }}>Start gateway group</Button>
