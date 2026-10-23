@@ -1,16 +1,20 @@
 import { describe, expect, it } from 'vitest'
 
 import { linuxOzoneBackend } from './hud-windowing'
-import { wslgLaunchArgs } from './wslg-launch'
+import { needsWaylandIme, wslgLaunchArgs } from './wslg-launch'
 
 const env = { WSL_DISTRO_NAME: 'Ubuntu', WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' }
+
+// Every relaunch that selects the Wayland ozone backend also carries the Wayland IME switch
+// (#143425): the backend alone leaves Chromium's text-input client off.
+const waylandRelaunch = (...argv: string[]): string[] => [...argv, '--ozone-platform=wayland', '--enable-wayland-ime']
 
 describe('WSLg launch arguments', () => {
   it('preserves the invocation and restarts only once with native Wayland', () => {
     const args = ['.', '--inspect=9229', 'hermes://session/example']
     const next = wslgLaunchArgs(args, env, 'linux')!
 
-    expect(next).toEqual([...args, '--ozone-platform=wayland'])
+    expect(next).toEqual(waylandRelaunch(...args))
     expect(wslgLaunchArgs(next, env, 'linux')).toBeNull()
     expect(args).toEqual(['.', '--inspect=9229', 'hermes://session/example'])
   })
@@ -24,9 +28,7 @@ describe('WSLg launch arguments', () => {
       '--ozone-platform-hint=x11',
       '--ozone-platform=x11'
     ])
-    expect(wslgLaunchArgs([], { ...env, HERMES_DESKTOP_DISABLE_GPU: 'true' }, 'linux')).toEqual([
-      '--ozone-platform=wayland'
-    ])
+    expect(wslgLaunchArgs([], { ...env, HERMES_DESKTOP_DISABLE_GPU: 'true' }, 'linux')).toEqual(waylandRelaunch())
     expect(wslgLaunchArgs([], { ...env, ELECTRON_OZONE_PLATFORM_HINT: 'x11' }, 'linux')).toEqual([
       '--ozone-platform=x11'
     ])
@@ -55,13 +57,9 @@ const nativeWayland = { XDG_SESSION_TYPE: 'wayland', WAYLAND_DISPLAY: 'wayland-0
 
 describe('native Wayland launch arguments', () => {
   it('appends wayland on a native Linux Wayland session when the user did not choose a platform', () => {
-    expect(wslgLaunchArgs(['.'], nativeWayland, 'linux')).toEqual(['.', '--ozone-platform=wayland'])
-    expect(wslgLaunchArgs([], { WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' }, 'linux')).toEqual([
-      '--ozone-platform=wayland'
-    ])
-    expect(wslgLaunchArgs([], { XDG_SESSION_TYPE: 'wayland', DISPLAY: ':0' }, 'linux')).toEqual([
-      '--ozone-platform=wayland'
-    ])
+    expect(wslgLaunchArgs(['.'], nativeWayland, 'linux')).toEqual(waylandRelaunch('.'))
+    expect(wslgLaunchArgs([], { WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' }, 'linux')).toEqual(waylandRelaunch())
+    expect(wslgLaunchArgs([], { XDG_SESSION_TYPE: 'wayland', DISPLAY: ':0' }, 'linux')).toEqual(waylandRelaunch())
     expect(wslgLaunchArgs(['--ozone-platform=wayland'], nativeWayland, 'linux')).toBeNull()
   })
 
@@ -82,7 +80,7 @@ describe('native Wayland launch arguments', () => {
 
   it('lets desktop.electron_flags choose the ozone platform instead of forcing wayland', () => {
     expect(wslgLaunchArgs([], nativeWayland, 'linux', ['--ozone-platform=x11'])).toEqual(['--ozone-platform=x11'])
-    expect(wslgLaunchArgs(['.'], nativeWayland, 'linux', ['--disable-gpu'])).toEqual(['.', '--ozone-platform=wayland'])
+    expect(wslgLaunchArgs(['.'], nativeWayland, 'linux', ['--disable-gpu'])).toEqual(waylandRelaunch('.'))
     expect(wslgLaunchArgs([], { XDG_SESSION_TYPE: 'x11', DISPLAY: ':0' }, 'linux')).toBeNull()
     expect(wslgLaunchArgs([], { ...nativeWayland, SSH_CONNECTION: 'remote' }, 'linux')).toBeNull()
   })
@@ -96,14 +94,77 @@ describe('native Wayland launch arguments', () => {
 
     expect(
       wslgLaunchArgs([], { ...nativeWayland, ELECTRON_OZONE_PLATFORM_HINT: 'wayland' }, 'linux', [], true)
-    ).toEqual(['--ozone-platform=wayland'])
-    expect(wslgLaunchArgs([], nativeWayland, 'linux', ['--ozone-platform-hint=wayland'], true)).toEqual([
-      '--ozone-platform=wayland'
-    ])
-    expect(wslgLaunchArgs([], nativeWayland, 'linux', ['--ozone-platform=wayland'], true)).toEqual([
-      '--ozone-platform=wayland'
-    ])
+    ).toEqual(waylandRelaunch())
+    expect(wslgLaunchArgs([], nativeWayland, 'linux', ['--ozone-platform-hint=wayland'], true)).toEqual(
+      waylandRelaunch()
+    )
+    expect(wslgLaunchArgs([], nativeWayland, 'linux', ['--ozone-platform=wayland'], true)).toEqual(waylandRelaunch())
     expect(wslgLaunchArgs(['--ozone-platform=wayland'], nativeWayland, 'linux', [], true)).toBeNull()
     expect(wslgLaunchArgs([], { XDG_SESSION_TYPE: 'x11', DISPLAY: ':0' }, 'linux', [], true)).toBeNull()
+  })
+})
+
+// #143425: Chromium keeps its Wayland text-input client off unless the switch is on the
+// command line, so a native Wayland session had no preedit/candidate window (CJK input dead)
+// until the user found `desktop.electron_flags`. The switch rides the same launch that picks
+// the wayland ozone backend; XWayland keeps the GTK/Qt IME path and needs nothing.
+describe('Wayland IME switch', () => {
+  it('rides the relaunch that selects the wayland backend', () => {
+    expect(wslgLaunchArgs(['.'], nativeWayland, 'linux')).toEqual([
+      '.',
+      '--ozone-platform=wayland',
+      '--enable-wayland-ime'
+    ])
+    expect(wslgLaunchArgs([], { ...nativeWayland, ELECTRON_OZONE_PLATFORM_HINT: 'wayland' }, 'linux')).toEqual([
+      '--ozone-platform=wayland',
+      '--enable-wayland-ime'
+    ])
+    expect(wslgLaunchArgs([], nativeWayland, 'linux', ['--ozone-platform=wayland'])).toEqual([
+      '--ozone-platform=wayland',
+      '--enable-wayland-ime'
+    ])
+    expect(wslgLaunchArgs([], env, 'linux')).toEqual(['--ozone-platform=wayland', '--enable-wayland-ime'])
+  })
+
+  it('stays off an XWayland relaunch, a forwarded session and other platforms', () => {
+    expect(wslgLaunchArgs(['.'], nativeWayland, 'linux', [], true)).toEqual(['.', '--ozone-platform=x11'])
+    expect(wslgLaunchArgs([], { ...nativeWayland, ELECTRON_OZONE_PLATFORM_HINT: 'x11' }, 'linux')).toEqual([
+      '--ozone-platform=x11'
+    ])
+    expect(wslgLaunchArgs(['--ozone-platform-hint=x11'], nativeWayland, 'linux')).toEqual([
+      '--ozone-platform-hint=x11',
+      '--ozone-platform=x11'
+    ])
+    expect(wslgLaunchArgs([], { ...nativeWayland, SSH_CONNECTION: 'remote' }, 'linux')).toBeNull()
+  })
+
+  it('does not duplicate the switch when the caller already passed it', () => {
+    expect(wslgLaunchArgs([], nativeWayland, 'linux', ['--enable-wayland-ime'])).toEqual([
+      '--ozone-platform=wayland',
+      '--enable-wayland-ime'
+    ])
+    expect(wslgLaunchArgs(['--enable-wayland-ime'], nativeWayland, 'linux')).toEqual([
+      '--enable-wayland-ime',
+      '--ozone-platform=wayland'
+    ])
+  })
+
+  // A launch that already carries the ozone platform never relaunches; entry.ts appends the
+  // switch itself, so the decision has to be reachable from the argv alone.
+  it('covers an in-process launch that already carries the wayland platform', () => {
+    expect(needsWaylandIme(['--ozone-platform=wayland'], nativeWayland, 'linux')).toBe(true)
+    expect(needsWaylandIme(['--ozone-platform=wayland'], { WAYLAND_DISPLAY: 'wayland-0' }, 'linux')).toBe(true)
+    expect(needsWaylandIme([], { ...nativeWayland, ELECTRON_OZONE_PLATFORM_HINT: 'wayland' }, 'linux')).toBe(true)
+  })
+
+  it('leaves every launch that is not a local native Wayland one alone', () => {
+    expect(needsWaylandIme(['--ozone-platform=wayland', '--enable-wayland-ime'], nativeWayland, 'linux')).toBe(false)
+    expect(needsWaylandIme(['--ozone-platform=x11'], nativeWayland, 'linux')).toBe(false)
+    expect(needsWaylandIme([], { XDG_SESSION_TYPE: 'x11', DISPLAY: ':0' }, 'linux')).toBe(false)
+    expect(needsWaylandIme(['--ozone-platform=wayland'], { ...nativeWayland, SSH_CONNECTION: 'remote' }, 'linux')).toBe(
+      false
+    )
+    expect(needsWaylandIme(['--ozone-platform=wayland'], nativeWayland, 'darwin')).toBe(false)
+    expect(needsWaylandIme(['--ozone-platform=wayland'], nativeWayland, 'win32')).toBe(false)
   })
 })

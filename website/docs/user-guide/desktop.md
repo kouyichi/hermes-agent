@@ -208,6 +208,8 @@ Talk to Hermes and hear it back, the same [voice mode](./features/voice-mode.md)
 
 On a local Wayland session (`XDG_SESSION_TYPE=wayland`, or `WAYLAND_DISPLAY` set) Hermes launches with `--ozone-platform=wayland` so Electron does not fall back to XWayland. The platform has to be on the process command line before application JavaScript loads. An explicit `--ozone-platform`, `desktop.ozone_platform_hint: x11`, or an ozone platform in `desktop.electron_flags` still wins. Drag, click-through, and resize work on the native Wayland path.
 
+The same launch adds `--enable-wayland-ime`, because Chromium keeps its Wayland text-input client off without it and the composer then receives no IME events at all — no preedit, no candidate window, so fcitx5/ibus input (Chinese, Japanese, Korean) types as plain Latin. Nothing has to be configured for that. The switch is tied to the Wayland ozone backend, so an XWayland launch (the `ozone_platform_hint: x11` / `--ozone-platform=x11` escape hatch below) keeps the GTK/Qt input path and does not get it — which is also the way to opt out, for a compositor whose input-popup surface positions candidates off-screen. Passing `--enable-wayland-ime` yourself is harmless; it is never added twice.
+
 On **Hyprland** (including Omarchy) the HUD is floated and pinned through the compositor's IPC after it maps — otherwise Hyprland tiles it like any other window, `always-on-top` is ignored, and compositor drag does nothing. No extra window rule is required.
 
 A few compositors (notably COSMIC) ignore `always-on-top` for native Wayland windows. To restore pinning there, run the app under XWayland:

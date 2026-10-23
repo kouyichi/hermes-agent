@@ -1,4 +1,45 @@
 import { detectRemoteDisplay } from './bootstrap-platform'
+import { linuxOzoneBackend } from './hud-windowing'
+
+export const WAYLAND_IME_SWITCH = '--enable-wayland-ime'
+
+/**
+ * Whether a launch that is already past the relaunch — `entry.ts`'s in-process
+ * path, where the ozone platform is on argv and no child is spawned — still has
+ * to append `--enable-wayland-ime` (#143425).
+ *
+ * The Wayland ozone backend does NOT imply Chromium's Wayland text-input
+ * client: without the switch there is no preedit and no candidate window, so a
+ * fcitx5/ibus user gets no CJK input at all and nothing in the UI says why. It
+ * is needed only where the IME is the Wayland one — an XWayland launch (the
+ * documented `--ozone-platform=x11` / `desktop.ozone_platform_hint: x11`
+ * escape hatch) keeps the GTK/Qt input path, which is also why that stays the
+ * opt-out for a compositor with a broken input-popup surface.
+ */
+export function needsWaylandIme(argv: readonly string[], env: NodeJS.ProcessEnv, platform: NodeJS.Platform): boolean {
+  if (platform !== 'linux' || argv.includes(WAYLAND_IME_SWITCH)) {
+    return false
+  }
+
+  // A forwarded display renders through the software path, where there is no
+  // local input-method surface to bind to (same gate as the relaunch below).
+  const displayEnv = { ...env, HERMES_DESKTOP_DISABLE_GPU: undefined }
+
+  if (detectRemoteDisplay({ env: displayEnv, platform })) {
+    return false
+  }
+
+  return linuxOzoneBackend(env, argv) === 'wayland'
+}
+
+/** The relaunch argv, carrying the Wayland IME switch when the backend is Wayland. */
+function withWaylandIme(args: readonly string[], backend: string): string[] {
+  if (backend !== 'wayland' || args.includes(WAYLAND_IME_SWITCH)) {
+    return [...args]
+  }
+
+  return [...args, WAYLAND_IME_SWITCH]
+}
 
 // Ozone is selected before application JavaScript. Never appendSwitch here:
 // that leaves the browser on X11 while GPU children receive Wayland.
@@ -31,13 +72,15 @@ export function wslgLaunchArgs(
   const flagged = explicitOzonePlatform(electronFlags)
 
   if (flagged !== null) {
-    return flagged ? [...argv, `--ozone-platform=${flagged}`] : null
+    return flagged ? withWaylandIme([...argv, `--ozone-platform=${flagged}`], flagged) : null
   }
 
   const hintArg = findOzoneHint(argv) ?? findOzoneHint(electronFlags)
   const hint = hintArg ?? env.ELECTRON_OZONE_PLATFORM_HINT
 
-  return [...argv, `--ozone-platform=${defaultBackend(hint, nvidiaProprietaryDriver)}`]
+  const backend = defaultBackend(hint, nvidiaProprietaryDriver)
+
+  return withWaylandIme([...argv, `--ozone-platform=${backend}`], backend)
 }
 
 // An explicit x11/wayland hint always wins. Without one, the NVIDIA proprietary

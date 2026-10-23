@@ -6,7 +6,7 @@ import { app } from 'electron'
 
 import { resolveDesktopHermesHome } from './data-paths'
 import { readDesktopLaunchConfig } from './renderer-heap-flags'
-import { wslgLaunchArgs } from './wslg-launch'
+import { needsWaylandIme, WAYLAND_IME_SWITCH, wslgLaunchArgs } from './wslg-launch'
 import { spawnWslgLaunch } from './wslg-launch-process'
 
 function configuredElectronFlags(env: NodeJS.ProcessEnv): string[] {
@@ -56,6 +56,14 @@ const args = wslgLaunchArgs(
   electronFlags,
   hasNvidiaProprietaryDriver()
 )
+
+// Chromium's Wayland text-input client is off unless this switch is on the command line, so a
+// native Wayland session had no preedit/candidate window and CJK input died (#143425). It rides
+// the relaunch argv above; a launch that already carries the ozone platform never relaunches,
+// and this is the earliest point in the app's own JavaScript to append it for that lane.
+if (needsWaylandIme(args ?? process.argv.slice(1), process.env, process.platform)) {
+  app.commandLine.appendSwitch(WAYLAND_IME_SWITCH.slice(2))
+}
 
 if (args) {
   // Keep the launcher alive until the child exits: npm's concurrently must not
