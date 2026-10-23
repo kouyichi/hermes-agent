@@ -41,10 +41,11 @@ import { Pill } from '../../settings/primitives'
 import { useDeepLinkHighlight } from '../../settings/use-deep-link-highlight'
 import { CatalogAlert } from '../catalog/catalog-alert'
 import { CatalogBrowser } from '../catalog/catalog-browser'
-import { type CatalogEntry, parseCatalog } from '../catalog/catalog-data'
+import { type CatalogEntry, parseCatalog, useCatalog } from '../catalog/catalog-data'
 import { CatalogSwitch } from '../catalog/catalog-switch'
 import { TOOLSETS_QUERY_KEY } from '../toolsets/toolsets-data'
 
+import { catalogAssociation } from './plugin-catalog-match'
 import { mergePluginPackages, type PackageKind, type PluginPackage } from './plugin-packages'
 import { runPluginUpdate } from './plugin-update'
 
@@ -587,6 +588,9 @@ export const PluginsTab = memo(function PluginsTab({
   const { t } = useI18n()
   const p = t.skills.plugins
   const { requestGateway } = useGatewayRequest()
+  // Same query key the browser below subscribes to: this only mirrors its list,
+  // and a repository match needs it to tell a monorepo's entries apart.
+  const { data: catalogEntries } = useCatalog('plugins')
 
   const desktopRecords = useStore($pluginRecords)
   const agentRows = useStore($agentPlugins)
@@ -675,10 +679,24 @@ export const PluginsTab = memo(function PluginsTab({
     return byName
   }, [installedEntries, packageById])
 
-  const matchInstalled = useCallback(
-    (entry: CatalogEntry) => installedByCatalogName.get(entry.name),
-    [installedByCatalogName]
+  const installedAssociation = useMemo(
+    () =>
+      catalogAssociation(
+        installedEntries.map(entry => {
+          const pkg = packageById.get(entry.id)
+
+          return {
+            catalogName: pkg?.agent?.catalog_name ?? pkg?.desktop?.packageOrigin?.catalogName,
+            entry,
+            repo: entry.repo
+          }
+        }),
+        catalogEntries ?? []
+      ),
+    [catalogEntries, installedEntries, packageById]
   )
+
+  const matchInstalled = useCallback((entry: CatalogEntry) => installedAssociation.match(entry), [installedAssociation])
 
   const isInstalled = (entry: CatalogEntry) => packageById.has(entry.id)
 

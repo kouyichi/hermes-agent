@@ -948,4 +948,100 @@ describe('PluginsTab catalog UX', () => {
     expect($pluginInstallRequest.get()).toBeNull()
     expect(requestGateway).not.toHaveBeenCalledWith('plugins.manage', expect.objectContaining({ action: 'remove' }))
   })
+
+  // #143522: installing a catalogued plugin by repository records no catalog_name,
+  // so the entry only recognises its own package through the recorded git remote.
+  it('associates a package installed from a repository with its catalog entry by repository identity', async () => {
+    $catalogCardView.set(true)
+    $agentPlugins.set([
+      {
+        description: '',
+        has_desktop_half: true,
+        key: 'weather',
+        name: 'weather',
+        source: 'git',
+        status: 'enabled',
+        version: '2.0.0'
+      }
+    ])
+    publishPlugin({
+      id: 'weather-widget',
+      kind: 'disk',
+      name: 'Weather Widget',
+      packageName: 'weather',
+      packageOrigin: { repo: 'git@github.com:example/weather-plugin.git' },
+      status: 'loaded'
+    })
+    requestGateway.mockImplementation(async (_method, params) =>
+      params?.action === 'toggle'
+        ? { ok: true, plugin: { key: 'weather', name: 'weather', status: 'disabled' } }
+        : { plugins: $agentPlugins.get() }
+    )
+    seedCatalog()
+
+    await act(async () => {
+      renderPlugins({ profile: 'workbot' })
+    })
+
+    const card = screen
+      .getAllByRole('article')
+      .find(article => within(article).queryByRole('button', { name: weatherEntry.name }))!
+
+    const toggle = within(card).getByRole('switch', { name: 'Weather Widget' })
+
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    fireEvent.click(toggle)
+
+    await waitFor(() =>
+      expect(requestGateway).toHaveBeenCalledWith(
+        'plugins.manage',
+        expect.objectContaining({ action: 'toggle', key: 'weather', profile: 'workbot' })
+      )
+    )
+    expect($pluginInstallRequest.get()).toBeNull()
+    expect($agentPlugins.get()[0]?.catalog_name).toBeUndefined()
+  })
+
+  it('does not claim a catalog entry when several installed packages share its repository', async () => {
+    $catalogCardView.set(true)
+    $agentPlugins.set(
+      ['weather-a', 'weather-b'].map(name => ({
+        description: '',
+        has_desktop_half: true,
+        key: name,
+        name,
+        source: 'git',
+        status: 'enabled' as const,
+        version: '2.0.0'
+      }))
+    )
+    publishPlugin({
+      id: 'weather-widget-a',
+      kind: 'disk',
+      name: 'Weather Widget A',
+      packageName: 'weather-a',
+      packageOrigin: { repo: 'https://github.com/example/weather-plugin' },
+      status: 'loaded'
+    })
+    publishPlugin({
+      id: 'weather-widget-b',
+      kind: 'disk',
+      name: 'Weather Widget B',
+      packageName: 'weather-b',
+      packageOrigin: { repo: 'git@github.com:example/weather-plugin.git' },
+      status: 'loaded'
+    })
+    seedCatalog()
+
+    await act(async () => {
+      renderPlugins({ profile: 'workbot' })
+    })
+
+    const card = screen
+      .getAllByRole('article')
+      .find(article => within(article).queryByRole('button', { name: weatherEntry.name }))!
+
+    expect(within(card).queryAllByRole('switch')).toHaveLength(0)
+    expect(within(card).getAllByRole('button', { name: `Add ${weatherEntry.name}` })).toHaveLength(1)
+  })
 })
