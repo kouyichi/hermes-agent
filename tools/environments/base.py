@@ -511,7 +511,7 @@ class BaseEnvironment(ABC):
         data. See #64435.
         """
         if output is None:
-            output = _new_output_collector(proc, bounded_capture)
+            output = _new_output_collector(proc, bounded_capture, self._cwd_marker)
         drain_stop = threading.Event() if yield_handler is not None else None
         drain_thread = _start_drain_thread(proc, output, drain_stop)
         _now = time.monotonic()
@@ -704,7 +704,7 @@ class BaseEnvironment(ABC):
             proc_holder.append(spawned)
             if fenced:  # the hard-exit kill may have stopped waiting for us before we registered
                 self._force_kill_process(spawned)
-            output = _new_output_collector(spawned, bounded_capture)
+            output = _new_output_collector(spawned, bounded_capture, self._cwd_marker)
             output_holder.append(output)
             try:
                 return self._wait_for_process(
