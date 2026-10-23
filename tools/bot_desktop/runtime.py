@@ -29,6 +29,15 @@ from typing import Dict, Optional
 from hermes_constants import get_hermes_home
 from tools.bot_desktop import placement
 
+try:  # POSIX lock for the per-profile start lock and the host-wide display allocation lock.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:  # Windows: a byte-range lock, the shape the rest of the tree uses (agent/vault_store.py).
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
+
 logger = logging.getLogger(__name__)
 
 _LAUNCHER = Path(__file__).with_name("launcher.sh")
@@ -314,13 +323,30 @@ _ALLOC_LOCK = Path(os.environ.get("XDG_RUNTIME_DIR") or Path.home() / ".cache") 
 
 @contextlib.contextmanager
 def _flocked(path: Path):
-    import fcntl  # windows-footgun: ok — Linux-only runtime (is_supported_host gates start)
-    with open(path, "a+", encoding="utf-8") as fh:  # windows-footgun: ok — Linux-only runtime
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    """Exclusive lock on ``path``, across processes.
+
+    POSIX takes ``flock``; Windows takes a one-byte ``msvcrt`` range lock, which needs that byte to exist,
+    so an empty lock file is grown first. This cannot assume POSIX: a ``terminal`` placement brings its
+    screen up *inside* the terminal backend (``start()`` reaches ``_start_in_sandbox`` before the
+    Linux-only gate), so the gateway host may be Windows.
+    """
+    if fcntl is None and (not path.exists() or path.stat().st_size == 0):
+        path.write_text(" ", encoding="utf-8")  # msvcrt locks a byte range, so the byte has to exist
+    with open(path, "a+" if fcntl is not None else "r+", encoding="utf-8") as fh:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        else:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
         try:
             yield fh
         finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                if fcntl is not None:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                else:
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _pick_display() -> int:
