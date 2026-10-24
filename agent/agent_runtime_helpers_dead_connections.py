@@ -11,18 +11,47 @@ logger = logging.getLogger("run_agent")  # origin module's logger name: log reco
 
 
 def _socket_is_dead(sock) -> bool:
-    """Probe socket health with a non-blocking recv peek."""
+    """Probe a pooled socket for a peer that has closed, without moving its blocking mode.
+
+    Readiness comes from ``select`` plus one portable read, because neither ``recv`` flag is:
+    Windows has no ``MSG_DONTWAIT`` (every probe raised ``AttributeError`` there), and
+    ``ssl.SSLSocket.recv`` rejects any non-zero ``flags`` (``ValueError`` on every HTTPS socket).
+    A plain socket is peeked with ``MSG_PEEK`` and never consumed. The stdlib has no peeking TLS
+    read, so a readable TLS socket is read for at most one byte under a zero timeout: ``b""`` is
+    the peer's close_notify, ``SSLWantReadError`` means nothing was buffered (a post-handshake
+    ticket is absorbed exactly as the next real read would absorb it), and a byte of application
+    data means a connection this turn-boundary pool cannot reuse — httpcore drains a body before
+    pooling it, and this client speaks HTTP/1.1 only. The caller's timeout is restored either way.
+    """
+    import select
     import socket as _socket
+    import ssl
+
     try:
-        sock.setblocking(False)
-        return sock.recv(1, _socket.MSG_PEEK | _socket.MSG_DONTWAIT) == b""
+        if not select.select([sock], [], [], 0)[0]:
+            return False  # nothing inbound: healthy, and the socket was not touched
+    except (OSError, ValueError):
+        return True  # unusable descriptor: nothing can reuse this socket
+
+    try:
+        timeout = sock.gettimeout()
+    except (OSError, ValueError):
+        return False  # cannot bound a read: leave the socket alone rather than block on it
+    try:
+        sock.settimeout(0.0)
+        if isinstance(sock, ssl.SSLSocket):
+            sock.recv(1)
+            return True  # inbound application data: this pooled socket cannot be reused
+        return sock.recv(1, _socket.MSG_PEEK) == b""
+    except ssl.SSLWantReadError:
+        return False  # no decrypted bytes buffered: socket is healthy
     except BlockingIOError:
         return False  # no data available: socket is healthy
     except OSError:
         return True
     finally:
         with contextlib.suppress(OSError):
-            sock.setblocking(True)
+            sock.settimeout(timeout)
 
 
 def _count_dead_pool_sockets(client: Any) -> int:
