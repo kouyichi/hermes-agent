@@ -178,10 +178,18 @@ def _idle_compaction(
     _idle_last_compaction = getattr(_compressor, "last_compression_rough_tokens", 0)
     if not isinstance(_idle_last_compaction, int) or isinstance(_idle_last_compaction, bool):
         _idle_last_compaction = 0
+    # An engine that reports no produced size (the LCM engine logs "last compaction produced
+    # ~n/a") leaves the honest floor at its theoretical value, so a pass that returned the
+    # transcript unchanged re-runs on every later idle resume (#143897). Remember the estimate
+    # this gate fired at and treat it as the floor the next time.
+    _idle_noop_tokens = getattr(agent, "_idle_compaction_noop_tokens", 0)
+    if not isinstance(_idle_noop_tokens, int) or isinstance(_idle_noop_tokens, bool):
+        _idle_noop_tokens = 0
     if not _tc._should_idle_compact(
         enabled=agent.compression_enabled, idle_after_seconds=_idle_after,
         idle_gap_seconds=_idle_gap, tokens=_idle_tokens, floor_tokens=_idle_floor,
-        cooldown_active=bool(_idle_cooldown), last_compaction_tokens=_idle_last_compaction,
+        cooldown_active=bool(_idle_cooldown),
+        last_compaction_tokens=max(_idle_last_compaction, _idle_noop_tokens),
     ):
         return
     logger.info(
@@ -212,6 +220,11 @@ def _idle_compaction(
             agent, out.messages, out.conversation_history
         )
         out.current_turn_user_idx = _reanchor(agent, out.messages, user_message)
+        agent._idle_compaction_noop_tokens = 0
+    elif _idle_last_compaction <= 0:
+        # Nothing reclaimed and no produced size to raise the floor with: charge the next idle
+        # resume a floor's worth of new content before re-running this pass (#143897).
+        agent._idle_compaction_noop_tokens = _idle_tokens
 
 
 def _codex_native_auto_compaction(agent: Any) -> bool:
