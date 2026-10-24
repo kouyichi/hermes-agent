@@ -963,3 +963,52 @@ class TestCatalogSweepFalsePositives:
         # A bump un-blocks previously-quarantined packages; assert the contract (changed), not a literal.
         assert PLUGIN_SCANNER_VERSION != "plugin-guard-v10"
         assert PLUGIN_SCANNER_VERSION.startswith("plugin-guard-v")
+
+
+class TestFixedPathProcIntrospection:
+    """A read of THIS process's own cgroup/mount layout is container detection, not traversal.
+
+    #144123: ``/proc/self/cgroup`` and ``/proc/self/mountinfo`` are how a plugin sizes local work
+    inside a container; both describe the running process, name no other one and reach no host
+    path. The finding stays in the report as a note, so the verdict is ``safe`` and an unattended
+    update no longer stops for a confirmation it can never answer. Every other ``/proc`` shape —
+    a write, an escape leaf, another leaf, a computed path, a fixed numeric PID — keeps ``high``.
+    """
+
+    _READS = (
+        "from pathlib import Path\n"
+        "\n"
+        "\n"
+        "def container_layout():\n"
+        "    return (\n"
+        '        Path("/proc/self/cgroup").read_text(),\n'
+        '        Path("/proc/self/mountinfo").read_text(),\n'
+        "    )\n"
+    )
+
+    def test_read_only_proc_layout_is_a_note(self, tmp_path):
+        result = scan_plugin(_mk_plugin(tmp_path, {**BASE_FILES, "capacity.py": self._READS}),
+                             source="owner/repo")
+        assert {f.severity for f in result.findings if f.pattern_id == "proc_access"} == {"medium"}, \
+            format_scan_report(result)
+        assert result.verdict == "safe", format_scan_report(result)
+        assert should_allow_plugin_install(result) == (True, "Allowed (clean scan)")
+
+    @pytest.mark.parametrize("rel,text", [
+        ("capacity.py", 'Path("/proc/self/cgroup").write_text("0::/")\n'),
+        ("capacity.py", 'open("/proc/self/mountinfo", "w").write("")\n'),
+        ("capacity.py", 'open("/proc/self/cgroup", "r+").write("0::/")\n'),
+        ("probe.py", 'Path("/proc/self/cgroup").read_text() + Path("/proc/self/environ").read_text()\n'),
+        ("probe.py", 'Path("/proc/self/cgroup/../environ").read_text()\n'),
+        ("probe.py", 'Path("/proc/self/root/etc/passwd").read_text()\n'),
+        ("probe.py", 'Path("/proc/self/cmdline").read_bytes()\n'),
+        ("probe.py", 'open("/proc/self/mem", "rb").read()\n'),
+        ("probe.py", 'Path(f"/proc/self/{leaf}").read_text()\n'),
+        ("probe.py", 'Path("/proc/1/cgroup").read_text()\n'),
+        ("probe.sh", "echo 0::/ > /proc/self/cgroup\n"),
+        ("probe.sh", "cat /proc/self/environ\n"),
+    ])
+    def test_other_proc_shapes_keep_full_severity(self, tmp_path, rel, text):
+        result = scan_plugin(_mk_plugin(tmp_path, {**BASE_FILES, rel: text}), source="owner/repo")
+        assert any(f.pattern_id == "proc_access" and f.severity == "high" for f in result.findings), \
+            format_scan_report(result)

@@ -772,6 +772,30 @@ def is_google_installed_app_secret(finding: Finding, line: str) -> bool:
     return finding.pattern_id == "hardcoded_secret" and bool(_GOOGLE_PUBLIC_CLIENT_SECRET.search(line))
 
 
+# ── (7) a read of this process's own procfs layout ──────────────────────────────────────────────
+# ``/proc/self/cgroup`` and ``/proc/self/mountinfo`` describe the RUNNING process's cgroup membership
+# and mount layout. Reading either is how code sizes its own work inside a container (CPU-quota
+# detection) and neither can name another process or reach a host path, so ``proc_access`` lands at a
+# note for that exact fixed path (#144123) instead of a caution verdict an unattended update can never
+# confirm. The attack twin keeps full severity: a WRITE or redirect to the same file, an escape leaf
+# (``root``, ``cwd``), any other leaf (``environ``, ``mem``, ``cmdline``), a dynamic path
+# (``f"/proc/self/{leaf}"``), a fixed numeric PID (``/proc/1/cgroup``), or a line that pairs the benign
+# path with one of those shapes.
+_FIXED_PATH_PROC_READ = re.compile(r"/proc/self/(?:cgroup|mountinfo)(?![\w./-])")
+_PROC_WRITE_SHAPE = re.compile(
+    r"write_text|write_bytes|\.write\s*\(|>>?\s*['\"]?/proc/"
+    r"|open\s*\([^)\n]*['\"](?:[wax][bt+]*|r\+[bt]*)['\"]|\btee\b|truncate")
+
+
+def is_fixed_path_proc_read(finding: Finding, line: str) -> bool:
+    """Every proc reference on the line is a read-only ``/proc/self`` ``cgroup``/``mountinfo`` path."""
+    if finding.pattern_id != "proc_access" or not _FIXED_PATH_PROC_READ.search(line):
+        return False
+    if _PROC_WRITE_SHAPE.search(line):
+        return False
+    return "/proc/" not in _FIXED_PATH_PROC_READ.sub("", line)
+
+
 __all__ = [
     "DOC_PROSE_EXTENSIONS",
     "LITERAL_INERT_PATTERN_IDS",
@@ -787,6 +811,7 @@ __all__ = [
     "is_disclosed_config_note",
     "is_doc_prose",
     "is_env_dump_in_safety_clause",
+    "is_fixed_path_proc_read",
     "is_google_installed_app_secret",
     "is_hex_in_char_class",
     "is_inert_fixture_line",
