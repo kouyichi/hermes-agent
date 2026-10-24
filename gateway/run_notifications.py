@@ -1677,16 +1677,21 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         adapter = self._resolve_injection_adapter(platform_name, source)
         return session_key in (getattr(adapter, "_active_sessions", None) or {})
 
-    async def _send_watcher_message(self, platform_name: str, chat_id, thread_id, message_text: str, watcher: dict) -> None:
-        from gateway.run import _non_conversational_metadata
+    async def _send_watcher_message(self, platform_name: str, chat_id, thread_id, message_text: str, watcher: dict,
+                                    *, interim: bool = False) -> None:
+        from gateway.run import _interim_metadata, _non_conversational_metadata
         source = await asyncio.to_thread(self._build_process_event_source, watcher)
         adapter = self._resolve_injection_adapter(platform_name, source)
         if adapter and chat_id:
             with _log_suppressed(logging.ERROR, "Watcher delivery error: %s"):
-                send_meta = {"thread_id": thread_id} if thread_id else None
-                await adapter.send(
-                    chat_id, message_text, metadata=_non_conversational_metadata(send_meta, platform=platform_name),
-                )
+                send_meta = _non_conversational_metadata(
+                    {"thread_id": thread_id} if thread_id else None, platform=platform_name)
+                # A receipt/progress send that lands while the launching turn is still live is NOT the
+                # turn-final: unmarked, a stream-is-the-message adapter seals the live stream with it
+                # and the real answer arrives after the remote conversation completed (#144152).
+                if interim:
+                    send_meta = _interim_metadata(send_meta)
+                await adapter.send(chat_id, message_text, metadata=send_meta)
 
     @staticmethod
     def _build_process_completion_event(watcher: dict, session, session_id: str) -> dict:
@@ -1845,7 +1850,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                             notify_mode == "error" and session.exit_code not in {0, None}
                         )):
                             message_text = self._format_process_final_message(session_id, session, "concise")
-                            await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
+                            await self._send_watcher_message(
+                                platform_name, chat_id, thread_id, message_text, watcher, interim=True)
                         break
                     # A refusal may clear (adapter reconnecting, store draining), so retry with backoff
                     # for a few minutes, then fall through to the plain notice instead of dropping it.
@@ -1893,8 +1899,10 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 break
             elif has_new_output and notify_mode == "all" and not agent_notify:
                 # New output — deliver a status update (only in "all" mode; agent_notify watchers
-                # only care about completion).
+                # only care about completion). The process is still running, so this is progress,
+                # not the turn-final.
                 await self._send_watcher_message(
                     platform_name, chat_id, thread_id, self._format_process_running_message(session), watcher,
+                    interim=True,
                 )
         logger.debug("Process watcher ended%s: %s", " (silent)" if silent else "", session_id)
