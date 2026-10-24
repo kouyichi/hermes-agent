@@ -33,11 +33,12 @@ def _resolved_str(path: Path) -> str:
 
 
 class _BackgroundReviewReadMarks:
-    """Read marks shared by copied tool contexts within one review run."""
+    """Read and write marks shared by copied tool contexts within one review run."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._paths: set[str] = set()
+        self._written: set[str] = set()
 
     def add(self, path: str) -> None:
         with self._lock:
@@ -46,6 +47,14 @@ class _BackgroundReviewReadMarks:
     def contains(self, path: str) -> bool:
         with self._lock:
             return path in self._paths
+
+    def note_written(self, name: str) -> None:
+        with self._lock:
+            self._written.add(name)
+
+    def wrote(self, name: str) -> bool:
+        with self._lock:
+            return name in self._written
 
 
 _background_review_read_paths: _ctxvars.ContextVar[Optional[_BackgroundReviewReadMarks]] = (
@@ -68,8 +77,26 @@ def _background_review_has_read(path: Path) -> bool:
     return marks is not None and marks.contains(_resolved_str(path))
 
 
+def mark_background_review_skill_written(name: str) -> None:
+    """Record that the active review fork WROTE skill *name* (create/patch/edit/write_file).
+
+    The consolidation delete guard needs this: an ``absorbed_into`` target that exists proves
+    nothing about absorption, so the evidence has to be a write to that umbrella in this pass.
+    Marks ride the same per-review holder as the read marks, so copied tool contexts see them."""
+    if not _is_background_review() or not name:
+        return
+    if (marks := _background_review_read_paths.get()) is None:
+        _background_review_read_paths.set(marks := _BackgroundReviewReadMarks())
+    marks.note_written(Path(name).name)  # bare name: skill_manage also accepts ``category/name``
+
+
+def _background_review_wrote(name: str) -> bool:
+    marks = _background_review_read_paths.get()
+    return marks is not None and marks.wrote(Path(name).name)
+
+
 def _reset_background_review_read_marks() -> None:
-    """Start a fresh, isolated read set for the current review context."""
+    """Start a fresh, isolated read/write set for the current review context."""
     _background_review_read_paths.set(_BackgroundReviewReadMarks())
 
 
@@ -250,3 +277,24 @@ def _curator_consolidation_delete_guard(
         f"forwarding target is not permitted here — the deterministic inactivity prune handles "
         f"staleness archival separately. Keeping '{name}' active.",
         _fail_closed=True)
+
+
+def _curator_absorption_evidence_guard(name: str, umbrella: str) -> Optional[dict[str, Any]]:
+    """Refuse a consolidation delete whose umbrella this pass never wrote.
+
+    ``_curator_consolidation_delete_guard`` only rejects a MISSING ``absorbed_into``, and
+    ``_delete_skill`` only checks that the named target EXISTS — so naming any live skill
+    satisfied both and the recoverable archive was reachable with no absorption at all
+    (#144026: four refusals, then the same skill archived into an unrelated umbrella). The
+    evidence is a write to that umbrella in this pass, recorded by
+    ``mark_background_review_skill_written``.
+    """
+    if not _is_background_review() or _background_review_wrote(umbrella):
+        return None
+    return _refusal(
+        f"Refusing background curator delete of skill '{name}': the umbrella '{umbrella}' was "
+        f"not written in this pass, so the consolidation is unverified. Merge '{name}' into "
+        f"'{umbrella}' first (skill_manage action=patch or action=write_file on it, or "
+        f"action=create if you are minting the umbrella now), then retry the delete. A skill that "
+        f"merely exists is not evidence of absorption — keeping '{name}' active.",
+        _absorption_unverified=True)

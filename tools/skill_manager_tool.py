@@ -29,7 +29,8 @@ from agent.skill_utils import (
     SKILL_PROMPT_DESC_LIMIT)
 from tools.skill_manager_guards import (
     _background_review_delete_guard, _background_review_preflight, _background_review_read_before_write_guard,
-    _containing_skills_root, _curator_consolidation_delete_guard, _is_path_redirect, _pinned_guard,
+    _containing_skills_root, _curator_absorption_evidence_guard, _curator_consolidation_delete_guard,
+    _is_path_redirect, _pinned_guard,
     _validate_delete_target, _is_background_review, _refusal as _err)
 from tools.skill_manager_batch import (
     _PATCH_EITHER_OR, _PATCH_NEEDS_NEW_STRING, _PATCH_NEEDS_OLD_STRING, _op_shape_error, _skill_manage_batch)
@@ -574,6 +575,8 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> dict[str, A
         if not _find_skill(absorbed_target):
             return _err(f"absorbed_into='{absorbed_target}' does not exist. "
                         f"Create or patch the umbrella skill first, then retry the delete.")
+        if (unverified := _curator_absorption_evidence_guard(name, absorbed_target)) is not None:
+            return unverified
     skills_root = _containing_skills_root(skill_dir)
     if unsafe := _validate_delete_target(skill_dir):  # defense-in-depth before rmtree
         return _err(unsafe)
@@ -732,6 +735,12 @@ def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
                     session_id, ledger_before) -> None:
     """Best-effort post-mutation side effects (never break the tool): ledger, prompt-cache
     clear, curator telemetry (which fires ``on_skill_lifecycle`` for plugins)."""
+    if action in {"create", "patch", "edit", "write_file"}:
+        # Absorption evidence for the consolidation delete guard: a review pass may only forward
+        # a skill into an umbrella it actually wrote in this pass (#144026).
+        with suppress(Exception):
+            from tools.skill_manager_guards import mark_background_review_skill_written
+            mark_background_review_skill_written(name)
     with suppress(Exception):
         from tools import skill_ledger as _ledger
         _post = _find_skill(name)

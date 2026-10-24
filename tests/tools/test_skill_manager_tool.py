@@ -1344,3 +1344,78 @@ class TestCuratorConsolidationDeleteGuard:
             assert allowed["success"] is True, allowed
 
         _reset_background_review_read_marks()
+
+    def test_delete_into_an_umbrella_this_pass_did_not_write_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        """#144026: naming any EXISTING skill satisfied the consolidation guard, so a review
+        pass could archive an active skill into an umbrella it never touched (the log shows
+        four refusals followed by a successful archive of the same skill). Absorption has to
+        be evidenced by a write to that umbrella inside this pass."""
+        from tools.skill_manager_guards import _reset_background_review_read_marks
+
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch) as skills_root:
+            _create_curator_skill("narrow-skill", _skill_content("narrow-skill"))
+            _create_curator_skill("umbrella", _skill_content("umbrella"))
+            # Both skills predate this pass: start it with no writes recorded, the way the
+            # review fork does before its first tool call.
+            _reset_background_review_read_marks()
+
+            result = _delete_skill("narrow-skill", absorbed_into="umbrella")
+
+        assert result["success"] is False, result
+        assert result.get("_absorption_unverified") is True
+        assert "not written in this pass" in result["error"]
+        # Fail closed: the skill is still active and the umbrella still exists.
+        assert (skills_root / "narrow-skill" / "SKILL.md").exists()
+        assert (skills_root / "umbrella" / "SKILL.md").exists()
+
+    def test_delete_after_patching_the_umbrella_archives_the_skill(
+        self, tmp_path, monkeypatch
+    ):
+        """The legitimate flow the curator prompt describes: merge into the umbrella, then
+        delete. Patching that umbrella in this pass is the evidence the guard wants."""
+        from tools.skill_manager_guards import _reset_background_review_read_marks
+        from tools.skills_tool import skill_view
+
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch) as skills_root:
+            _create_curator_skill("narrow-skill", _skill_content("narrow-skill"))
+            _create_curator_skill("umbrella", _skill_content("umbrella"))
+            _reset_background_review_read_marks()
+
+            assert json.loads(skill_view("umbrella"))["success"] is True
+            merged = json.loads(skill_manage(
+                action="patch",
+                name="umbrella",
+                old_string="Step 1: Do the thing.",
+                new_string="Step 1: Do the thing, including what narrow-skill taught.",
+            ))
+            assert merged["success"] is True, merged
+
+            archived = _delete_skill("narrow-skill", absorbed_into="umbrella")
+
+        assert archived["success"] is True, archived
+        assert archived.get("_archived") is True
+        assert not (skills_root / "narrow-skill").exists()
+        assert "narrow-skill taught" in (
+            skills_root / "umbrella" / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_delete_into_an_umbrella_created_this_pass_is_allowed(
+        self, tmp_path, monkeypatch
+    ):
+        """A new umbrella carries the content, so `create` is absorption evidence too — the
+        guard must not demand a patch of a skill the pass has just written from scratch."""
+        from tools.skill_manager_guards import _reset_background_review_read_marks
+
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch) as skills_root:
+            _create_curator_skill("narrow-skill", _skill_content("narrow-skill"))
+            _reset_background_review_read_marks()
+
+            created = json.loads(skill_manage(
+                action="create", name="fresh-umbrella", content=_skill_content("fresh-umbrella")))
+            assert created["success"] is True, created
+            archived = _delete_skill("narrow-skill", absorbed_into="fresh-umbrella")
+
+        assert archived["success"] is True, archived
+        assert not (skills_root / "narrow-skill").exists()
+        assert (skills_root / "fresh-umbrella" / "SKILL.md").exists()
