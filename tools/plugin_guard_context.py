@@ -772,6 +772,39 @@ def is_google_installed_app_secret(finding: Finding, line: str) -> bool:
     return finding.pattern_id == "hardcoded_secret" and bool(_GOOGLE_PUBLIC_CLIENT_SECRET.search(line))
 
 
+# ── (13) a secret that only ever rides an authentication header ──────────────────────────────
+# ``curl -s -H "PRIVATE-TOKEN: $FORGE_TOKEN" "https://git.example/api/v4/projects"`` is how a
+# documented API call authenticates: the credential goes in the header the issuing service asks
+# for. Exfiltration is the secret leaving in the URL, the query string or the request body
+# (``-d``/``-F``/``--data*``). A README or CI-workflow copy of the same line already lands at
+# ``high`` through the prose cap, but a ``skills/**/SKILL.md`` inside a plugin is an agent
+# instruction surface (``is_doc_prose`` excludes it), so it kept ``critical`` and hard-blocked every
+# package that teaches an authenticated call — ``--force`` does not override ``dangerous``
+# (#143863). Cap at ``high`` (``caution``: confirmable) when EVERY secret interpolation on the line
+# sits inside an authentication header, its NAME included (``PRIVATE-TOKEN:`` carries the word
+# ``TOKEN`` but no ``$``). One secret anywhere else on the line keeps the pattern's severity, and
+# the destination host is deliberately not judged — a header-only secret sent to an unknown host
+# stays a visible caution, never a silent pass.
+_AUTH_HEADER_SECRET_IDS = {"env_exfil_curl", "env_exfil_wget"}
+_AUTH_HEADER = re.compile(
+    r'''(?:-H|--header)\s*=?\s*["']?[^"'\n]*?'''
+    r'''(?:authorization|private-token|job-token|api-key|x-[\w-]*(?:key|token|secret))\s*:[^"'\n]*''',
+    re.IGNORECASE)
+# The threat pattern's own secret shape (case-sensitive, ``$``-anchored): ``$KEY``/``${API_TOKEN}``.
+_SECRET_INTERPOLATION = re.compile(r'\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b')
+
+
+def is_secret_only_in_auth_header(finding: Finding, line: str) -> bool:
+    """Every secret interpolation on the line sits inside an authentication-header value. A
+    ``\\``-continued line is left alone: its destination lives on the next line, where
+    ``is_loopback_continuation`` judges it."""
+    if finding.pattern_id not in _AUTH_HEADER_SECRET_IDS or line.rstrip().endswith("\\"):
+        return False
+    secrets = [m.span() for m in _SECRET_INTERPOLATION.finditer(line)]
+    headers = [m.span() for m in _AUTH_HEADER.finditer(line)]
+    return bool(secrets) and all(any(a <= s and e <= b for a, b in headers) for s, e in secrets)
+
+
 __all__ = [
     "DOC_PROSE_EXTENSIONS",
     "LITERAL_INERT_PATTERN_IDS",
@@ -797,6 +830,7 @@ __all__ = [
     "is_quoted_injection_phrase",
     "is_regex_alternation_token",
     "is_repo_root_traversal",
+    "is_secret_only_in_auth_header",
     "is_self_uninstall_doc",
     "is_sudo_inert",
     "is_test_tree",

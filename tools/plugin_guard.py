@@ -22,12 +22,13 @@ from tools.plugin_guard_context import (
     is_hex_in_char_class, is_inert_fixture_line, is_json_prose_value, is_locale_catalog,
     is_loopback_continuation, is_loopback_only, is_pip_install_in_prose_literal,
     is_quoted_injection_phrase, is_regex_alternation_token, is_repo_root_traversal,
-    is_self_uninstall_doc, is_sudo_inert, is_test_tree, is_trusted_installer_pipe, logical_line, prose_cap)
+    is_secret_only_in_auth_header, is_self_uninstall_doc, is_sudo_inert, is_test_tree,
+    is_trusted_installer_pipe, logical_line, prose_cap)
 from tools.skills_guard import (
     Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
     scan_file)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-v11"
+PLUGIN_SCANNER_VERSION = "plugin-guard-v12"
 
 # Never scanned: VCS internals, caches, vendored envs.
 EXCLUDED_DIRS = {
@@ -277,6 +278,8 @@ def _inert_context_cap(f: Finding, rel_path: str, line: str, joined: str, is_cod
         return _at_most(sev, "medium")
     if is_google_installed_app_secret(f, line):
         return _at_most(sev, "high")    # public installed-app OAuth client secret, reviewable caution
+    if is_secret_only_in_auth_header(f, line):
+        return _at_most(sev, "high")    # documented authenticated API call: confirmable caution
     return sev
 
 
