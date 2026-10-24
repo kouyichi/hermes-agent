@@ -172,6 +172,61 @@ def test_tab_never_queues_what_a_prompt_owns(prompt):
         assert not tab.filter(), prompt
 
 
+@pytest.mark.parametrize("suggestion, queues", [
+    (None, True),                              # nothing to accept: Tab queues the draft
+    (" staging build", False),                 # a visible ghost suggestion owns the key
+    ("", True),                                # an empty suggestion is nothing to accept
+])
+def test_tab_accepts_a_visible_ghost_suggestion_before_queueing(suggestion, queues):
+    """Tab has two jobs in the modern layout: accept a ghost suggestion, and (while a turn runs) queue
+    the draft. A suggestion opens no completion menu, so the queue rule matched first and the typed
+    text went to the queue while the suggestion could never be accepted (#143992). Resolution is
+    checked through prompt_toolkit's own key processor, not by re-reading the filters."""
+    from types import SimpleNamespace
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.auto_suggest import Suggestion
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.key_binding.key_processor import KeyPress, KeyProcessor
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.layout import BufferControl, Layout, Window
+    from cli import HermesCLI
+    from hermes_cli.cli_modern_layout import modern_input_rules
+
+    cli = SimpleNamespace(_agent_running=True, _tui_input_rule_height=lambda pos: 1,
+                          _attached_images=[], _inline_pastes=lambda buf: None,
+                          _tui_enter_while_busy=lambda *a, **k: None)
+    kb = KeyBindings()
+    kb.add("tab", eager=True)(HermesCLI.__new__(HermesCLI)._tui_handle_tab)  # as the CLI registers it
+    modern_input_rules(cli, kb)
+    proc = KeyProcessor(kb)
+    buf = Buffer(document=None)
+    buf.text = "deploy the"
+    buf.suggestion = Suggestion(suggestion) if suggestion is not None else None
+    app = Application(layout=Layout(Window(BufferControl(buffer=buf))))
+    with set_app(app):
+        winners = [b.handler.__name__ for b in proc._get_matches([KeyPress(Keys.ControlI)])]
+    assert (winners[-1] == "_queue_while_busy") is queues, winners
+
+
+def test_accepting_the_suggestion_extends_the_draft_instead_of_queueing_it():
+    """The half the queue rule was hiding: the ghost-accept handler appends the suggestion to the
+    draft, so Tab on a visible suggestion keeps the typed text in the composer. A history suggestion
+    carries only the continuation (" staging build"), not the whole line."""
+    from types import SimpleNamespace
+    from prompt_toolkit.auto_suggest import Suggestion
+    from prompt_toolkit.buffer import Buffer
+    from cli import HermesCLI
+
+    buf = Buffer(document=None)
+    buf.text = "deploy the"
+    buf.cursor_position = len(buf.text)
+    buf.suggestion = Suggestion(" staging build")
+    HermesCLI.__new__(HermesCLI)._tui_handle_tab(SimpleNamespace(current_buffer=buf))
+    assert buf.text == "deploy the staging build"
+
+
 def test_long_user_message_soft_wraps_so_a_resize_reflows_it(monkeypatch):
     """The glyph layout's echo of a long prompt is one logical line per source line: the terminal
     wraps it, so widening the window re-flows it instead of keeping old-width breaks."""

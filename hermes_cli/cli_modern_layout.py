@@ -393,7 +393,12 @@ def modern_input_rules(cli, kb):
         from hermes_cli.cli_subagent_monitor import modal_prompt_active
         buf = get_app().current_buffer
         text = buf.text.strip()
+        # A ghost suggestion renders without a completion menu, so queueing on it took the key from
+        # the accept path below and the suggestion could never be accepted (#143992). Tab accepts what
+        # the user can see first; the next Tab has nothing left to accept and queues.
+        suggestion = getattr(buf, "suggestion", None)
         return bool(getattr(cli, "_agent_running", False) and text and buf.complete_state is None
+                    and not (suggestion and suggestion.text)
                     and not _looks_like_slash_command(text) and not text.startswith("!")
                     and not modal_prompt_active(cli))
 
