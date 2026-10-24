@@ -7,6 +7,7 @@ import socket
 import ssl
 import threading
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -16,6 +17,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from agent.agent_runtime_helpers import _iter_pool_sockets
 from agent.agent_runtime_helpers_dead_connections import (
     _socket_is_dead,
     cleanup_dead_connections,
@@ -219,3 +221,62 @@ def test_cleanup_detects_a_dead_tls_pool(tls_pair) -> None:
     agent._replace_primary_openai_client.assert_called_once_with(
         reason="dead_connection_cleanup"
     )
+
+
+def test_cleanup_detects_a_real_https_pool_whose_peer_dropped(tmp_path):
+    """End to end over a real httpx pool: the sweep fires for an HTTPS endpoint.
+
+    The unit cases above hand-build the httpcore pool shape; this one proves the socket
+    ``_iter_pool_sockets`` actually yields from a live client is the one the probe judges.
+    """
+    import select
+
+    import httpx
+
+    _client_ctx, server_ctx = _tls_contexts(tmp_path)
+    peer_sockets: list[socket.socket] = []
+    body = b'{"ok":true}'
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            peer_sockets.append(self.connection)  # keep-alive: the server end stays open
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server.socket = server_ctx.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    http = httpx.Client(verify=False, timeout=5)
+    agent = SimpleNamespace(
+        client=http,
+        _request_client_cache=None,
+        _replace_primary_openai_client=MagicMock(),
+        _close_cached_request_openai_client=MagicMock(),
+    )
+    try:
+        assert http.get(f"https://127.0.0.1:{server.server_port}/").status_code == 200
+        assert cleanup_dead_connections(agent) is False  # live keep-alive pool
+        pooled = list(_iter_pool_sockets(http))
+        assert len(pooled) == 1 and isinstance(pooled[0], ssl.SSLSocket), pooled
+        # The peer drops the idle keep-alive connection: FIN, no close_notify.
+        assert peer_sockets, "server handler never recorded its socket"
+        peer_sockets[0].shutdown(socket.SHUT_RDWR)
+        assert select.select([pooled[0]], [], [], 5)[0], "peer FIN never reached the client"
+        assert cleanup_dead_connections(agent) is True
+        agent._replace_primary_openai_client.assert_called_once_with(
+            reason="dead_connection_cleanup"
+        )
+    finally:
+        http.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
