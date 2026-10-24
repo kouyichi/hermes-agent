@@ -19,11 +19,44 @@ log_success = _logger("✓", Colors.GREEN)
 log_warn = _logger("⚠", Colors.YELLOW)
 
 
-def _print_box(middle: str, col: str) -> None:
-    """Print the 3-line framed heading used by the uninstall screens."""
-    print(color("┌─────────────────────────────────────────────────────────┐", col, Colors.BOLD))
-    print(color(middle, col, Colors.BOLD))
-    print(color("└─────────────────────────────────────────────────────────┘", col, Colors.BOLD))
+_FRAME_INNER = 57  # cells between the heading frame's vertical rules
+
+
+def _fit_cells(text: str, width: int) -> str:
+    """``text`` cut to at most ``width`` terminal cells (a wide glyph spends two)."""
+    from prompt_toolkit.utils import get_cwidth
+
+    if get_cwidth(text) <= width:
+        return text
+    kept = ""
+    for char in text:
+        if get_cwidth(kept + char) > width - 1:
+            break
+        kept += char
+    return kept + ("…" if width else "")
+
+
+def _frame_row(title: str) -> str:
+    """``title`` centred inside the frame, padded by display cells rather than codepoints."""
+    from prompt_toolkit.utils import get_cwidth
+
+    text = _fit_cells(title, _FRAME_INNER)
+    pad = max(0, _FRAME_INNER - get_cwidth(text))
+    left = pad // 2
+    return "│" + " " * left + text + " " * (pad - left) + "│"
+
+
+def _print_box(title: str, col: str) -> None:
+    """Print the 3-line framed heading used by the uninstall screens.
+
+    Every row is built from :data:`_FRAME_INNER`, so the rules cannot drift apart. They
+    did: the heading was a hand-padded literal, and the two titles carrying ``☤`` were one
+    cell short, putting their right rule a column left of the corners (#143925).
+    """
+    edge = "─" * _FRAME_INNER
+    print(color(f"┌{edge}┐", col, Colors.BOLD))
+    print(color(_frame_row(title), col, Colors.BOLD))
+    print(color(f"└{edge}┘", col, Colors.BOLD))
 
 
 def _prompt(text: str):
@@ -707,7 +740,7 @@ def run_gui_uninstall(args):
     skip_confirm = bool(getattr(args, "yes", False))
 
     print()
-    _print_box("│         ☤ Hermes Chat GUI Uninstaller                  │", Colors.MAGENTA)
+    _print_box("☤ Hermes Chat GUI Uninstaller", Colors.MAGENTA)
     print()
 
     if not summary["gui_installed"]:
@@ -746,7 +779,7 @@ def run_gui_uninstall(args):
     uninstall_gui(hermes_home)
 
     print()
-    _print_box("│            ✓ Chat GUI Uninstalled!                      │", Colors.GREEN)
+    _print_box("✓ Chat GUI Uninstalled!", Colors.GREEN)
     print()
     print("The Hermes agent is still installed. Run 'hermes' to use the CLI,")
     print("or 'hermes uninstall' to remove the agent too.")
@@ -786,7 +819,7 @@ def run_uninstall(args):
         return
 
     print()
-    _print_box("│            ☤ Hermes Agent Uninstaller                  │", Colors.MAGENTA)
+    _print_box("☤ Hermes Agent Uninstaller", Colors.MAGENTA)
     print()
 
     # Show what will be affected
@@ -1118,7 +1151,7 @@ def _perform_uninstall(
         log_info(f"Keeping configuration and data in {hermes_home}")
 
     print()
-    _print_box("│              ✓ Uninstall Complete!                      │", Colors.GREEN)
+    _print_box("✓ Uninstall Complete!", Colors.GREEN)
     print()
 
     if not full_uninstall:
