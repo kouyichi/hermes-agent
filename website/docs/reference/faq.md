@@ -853,7 +853,8 @@ The full backup excludes:
 - The source checkout, dependency environments, and downloaded tools, models, and runtimes.
 - Build caches, checkpoints, previous backups, and quick snapshots.
 - Browser profiles, including copies of real-browser credentials.
-- Bytecode, SQLite sidecars, `gateway.pid`, `cron.pid`, and `.backup.lock`.
+- Bytecode, SQLite sidecars, `gateway.pid`, `cron.pid`, `.backup.lock`, and the lease files
+  (`runtime/*.lock`, `runtime/*.pid`) a running process holds open.
 
 `hermes backup --quick` saves selected state files instead of a full archive.
 It is not a replacement for the full backup before a machine migration.

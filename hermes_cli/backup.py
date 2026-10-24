@@ -27,7 +27,7 @@ from hermes_state_holders import read_only_db_uri
 from agent.provider_media import GENERATED_SUBDIR
 from hermes_cli.archive_safe import normalize_archive_parts
 from hermes_cli.backup_sqlite import _close_quietly, _safe_copy_db
-from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS, profile_root_entry
+from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS, is_runtime_lease_file, profile_root_entry
 from hermes_cli.sizefmt import format_bytes as _format_size
 
 from hermes_cli.backup_restore import (
@@ -314,7 +314,7 @@ def _is_link_path(path: Path) -> bool:
 def _should_exclude(rel_path: Path) -> bool:
     """Return True if *rel_path* (relative to hermes root) should be skipped."""
     parts = rel_path.parts
-    if _in_excluded_root_dir(rel_path):
+    if _in_excluded_root_dir(rel_path) or is_runtime_lease_file(parts):
         return True
     # ``hermes-agent`` only matches at the root level; nested same-named dirs are preserved.
     if any(p in _EXCLUDED_DIRS and (p != "hermes-agent" or p == parts[0]) for p in parts):
@@ -712,7 +712,7 @@ def _import_skipped(rel: str) -> bool:
         parts = tuple(normalize_archive_parts(rel))
     except ValueError:
         return False  # A rejected traversal is still reported by the import itself.
-    return (parts[-1] in _IMPORT_SKIP_NAMES or
+    return (parts[-1] in _IMPORT_SKIP_NAMES or is_runtime_lease_file(parts) or
             profile_root_entry(parts) in PM_RUNTIME_ROOT_DIRS or
             rel.endswith(_SQLITE_SIDECAR_SUFFIXES))
 
