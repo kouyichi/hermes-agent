@@ -39,10 +39,25 @@ describe('requestPetUpdate', () => {
 
     expect(update?.cells).toEqual(cells)
     expect(request).toHaveBeenNthCalledWith(1, 'pet.info.meta')
-    expect(request).toHaveBeenNthCalledWith(2, 'pet.cells', {
-      graphics: false,
-      state: 'review'
-    })
+    expect(request).toHaveBeenNthCalledWith(
+      2,
+      'pet.cells',
+      expect.objectContaining({
+        graphics: false,
+        state: 'review'
+      })
+    )
+  })
+
+  it('carries the client-detected protocol so auto mode can reach native pixels', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ enabled: true, slug: 'boba' })
+      .mockResolvedValueOnce({ enabled: true, graphics: 'kitty', slug: 'boba' })
+
+    await requestPetUpdate(gateway(request), 'idle', true, () => true, 'kitty')
+
+    expect(request).toHaveBeenNthCalledWith(2, 'pet.cells', { graphics: true, protocol: 'kitty', state: 'idle' })
   })
 
   it('silently drops cosmetic gateway failures', async () => {

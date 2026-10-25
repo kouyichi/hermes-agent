@@ -1520,12 +1520,12 @@ def _(rid, params: dict) -> dict:
                      "spritesheetRevision": _pet_sheet_revision(pet.spritesheet)})
 
 
-def _pet_kitty_cells(pet, pet_cfg: dict, state: str, scale: float) -> dict | None:
-    """kitty payload for a TTY that speaks it (dashboard PTY falls through); only kitty is grid-safe in Ink."""
+def _pet_kitty_cells(pet, pet_cfg: dict, state: str, scale: float, protocol: str | None = None) -> dict | None:
+    """kitty payload for a TTY that speaks it (dashboard PTY falls through); only kitty is grid-safe in Ink. ``protocol`` is the CLIENT's own detection: the gateway owner has no ``TERM``, so its answer is only the fallback for older clients (#144619)."""
     from agent.pet import constants, render
     from agent.pet.render import PetRenderer
     configured = str(pet_cfg.get("render_mode", "auto") or "auto").lower()
-    if (render.detect_terminal_graphics() if configured in ("", "auto") else configured) != "kitty":
+    if (configured if configured not in ("", "auto") else protocol or render.detect_terminal_graphics()) != "kitty":
         return None
     image_id = render.kitty_image_id(pet.slug)
     # kitty sizes from scaled pixels, so unicode_cols is moot here.
@@ -1553,7 +1553,7 @@ def _(rid, params: dict) -> dict:
     scale = float(pet_cfg.get("scale", constants.DEFAULT_SCALE) or constants.DEFAULT_SCALE)
     cols = int(params.get("cols") or 0) or constants.resolve_cols(scale, pet_cfg.get("unicode_cols", 0))
     base = {"enabled": True, "slug": pet.slug, "displayName": pet.display_name, "state": state}
-    if params.get("graphics") and (kitty := _pet_kitty_cells(pet, pet_cfg, state, scale)):
+    if params.get("graphics") and (kitty := _pet_kitty_cells(pet, pet_cfg, state, scale, _str_param(params, "protocol").lower())):
         return _ok(rid, {**base, **kitty})
     renderer = PetRenderer(str(pet.spritesheet), mode="unicode", scale=scale, unicode_cols=cols)
     count = renderer.frame_count(state) or 1

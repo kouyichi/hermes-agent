@@ -25441,7 +25441,7 @@
       },
       "PetCellsParams": {
         "additionalProperties": false,
-        "description": "``graphics`` opts into the kitty payload when the TTY speaks it; ``cols`` overrides the width.",
+        "description": "``graphics`` opts into a terminal-graphics payload; ``cols`` overrides the width; ``protocol`` is the CLIENT's own detection (``kitty``/``iterm``/``sixel``/``unicode``), because the gateway owner has no terminal env.",
         "properties": {
           "profile": {
             "anyOf": [
@@ -25483,6 +25483,18 @@
             "default": false,
             "title": "Graphics",
             "type": "boolean"
+          },
+          "protocol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Protocol"
           }
         },
         "title": "PetCellsParams",

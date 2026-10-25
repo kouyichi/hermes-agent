@@ -355,11 +355,12 @@ method("pet.info.meta", params=ProfileParams, result=PetInfoMetaResult,
 
 
 class PetCellsParams(ProfileParams):
-    """``graphics`` opts into the kitty payload when the TTY speaks it; ``cols`` overrides the width."""
+    """``graphics`` opts into a terminal-graphics payload; ``cols`` overrides the width; ``protocol`` is the CLIENT's own detection (``kitty``/``iterm``/``sixel``/``unicode``), because the gateway owner has no terminal env."""
 
     state: str | None = None
     cols: int | None = None
     graphics: bool = False
+    protocol: str | None = None
 
 
 class PetCellsResult(Result):

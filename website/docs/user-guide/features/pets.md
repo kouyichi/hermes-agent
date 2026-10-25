@@ -205,7 +205,10 @@ display:
   half-blocks.
 - **`render_mode: auto`** detects kitty/iTerm2/sixel and falls back to unicode
   half-blocks. Set it explicitly to force a protocol or `off` to disable
-  terminal rendering while keeping the pet on the desktop.
+  terminal rendering while keeping the pet on the desktop. The TUI detects the
+  protocol in the client process (the gateway daemon has no `TERM` of its own),
+  so a gateway-connected TUI gets the same answer as a local one and an explicit
+  `render_mode` still overrides it.
 - **`unicode_cols`** pins the terminal column width independently of `scale`;
   leave it at `0` to derive width from `scale`.
 
