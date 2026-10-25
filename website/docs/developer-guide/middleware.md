@@ -44,6 +44,11 @@ Every middleware callback receives:
 - Runtime context such as `session_id`, `task_id`, `turn_id`,
   `api_request_id`, `provider`, `model`, `api_mode`, `tool_name`, and
   `tool_call_id` when applicable.
+- For the LLM kinds, `has_pending_fallback`: whether a `fallback_providers`
+  entry is still available for this turn. A middleware that can turn a reply
+  into a failure (for example a content-policy refusal) can use it to leave the
+  reply alone when Hermes has nowhere to fall back to — with no entry left,
+  Hermes replaces the reply with its "declined" notice.
 
 Supported middleware kinds:
 

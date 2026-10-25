@@ -29,6 +29,18 @@ def _model_dump(value: Any) -> Any:
             return value.model_dump()
 
 
+def pending_fallback_available(agent: Any) -> bool:
+    """Whether a fallback provider remains — the ``has_pending_fallback`` middleware context field.
+
+    Middleware can turn a reply into a failure (a content-policy refusal, say); Hermes then moves to the
+    next fallback provider or, with none left, discards the reply for its "declined" notice. A plugin that
+    flags refusals needs that difference to avoid throwing away a valid answer (#144527). Tolerates the
+    partial agent doubles in tests, which carry no fallback chain.
+    """
+    probe = getattr(agent, "_has_pending_fallback", None)
+    return bool(probe()) if callable(probe) else False
+
+
 class ApiRequestHooksMixin:
     """Hook payload sanitising + ``api_request_error`` dispatch (see module docstring)."""
 

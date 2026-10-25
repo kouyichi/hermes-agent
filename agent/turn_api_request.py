@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import logging
 from typing import Any
 
+from agent.api_request_hooks import pending_fallback_available
 from agent.message_sanitization import sanitize_outbound_kwargs, strip_images_for_rejecting_model
 from hermes_cli.observability.shared_metrics_efficiency import observe_request_tools
 from utils import env_var_enabled
@@ -144,7 +145,7 @@ def build_request_payload(
             api_kwargs, task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
             session_id=agent.session_id or "", platform=agent.platform or "", model=agent.model,
             provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
-            api_call_count=api_call_count,
+            api_call_count=api_call_count, has_pending_fallback=pending_fallback_available(agent),
         )
         api_kwargs = _llm_request_mw.payload
         _original_api_kwargs = _llm_request_mw.original_payload
