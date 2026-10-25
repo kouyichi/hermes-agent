@@ -551,8 +551,9 @@ def _reconcile_cron_runs(
     A doc only has a window guess (``_execution_contains``), so docs pair with attempts
     only once every attempt's session is known (``_doc_writer``), one doc per attempt:
     the doc folds into its writer's session, or into a legacy session (which names no
-    execution) by time, and otherwise is its writer's row with the ledger status. A doc
-    no attempt claims is matched against every session by time, and kept if none matches.
+    execution) that began inside the attempt's run window, else by the doc's time, and
+    otherwise is its writer's row with the ledger status. A doc no attempt claims is
+    matched against every session by time, and kept if none matches.
     """
     def matches(doc_ts: float, sessions: list[dict[str, Any]]) -> bool:
         return any(_doc_matches_session(doc_ts, s, _SESSION_DOC_MATCH_SECONDS) for s in sessions)
@@ -575,7 +576,9 @@ def _reconcile_cron_runs(
         index, attempt = min(candidates, key=lambda c: _doc_writer(doc_ts, c[1], by_execution.get(c[1]["id"])))
         paired.add(index)
         represented.add(index)
-        if attempt["id"] in by_execution or matches(doc_ts, legacy):
+        if attempt["id"] in by_execution or matches(doc_ts, legacy) or _attempt_owns_legacy_session(
+            attempt, legacy
+        ):
             continue
         merged.append({**doc, "title": _execution_status_title(attempt["status"], attempt["error"], doc["title"])})
 
@@ -611,6 +614,23 @@ def _doc_writer(doc_ts: float, attempt: dict[str, Any], session: Optional[dict[s
         finish is not None and doc_ts > finish,
         session is None or not _doc_matches_session(doc_ts, session, _SESSION_DOC_MATCH_SECONDS),
         -attempt["claimed_at"],
+    )
+
+
+def _attempt_owns_legacy_session(
+    attempt: dict[str, Any], legacy: list[dict[str, Any]]
+) -> bool:
+    """Whether one of the execution-less sessions began inside this attempt's run window.
+
+    A run's session is opened at the fire, so its ``started_at`` sits inside the attempt's
+    ``[claimed_at, finished_at + grace]`` — the window ``_execution_contains`` applies to
+    an output doc. Pairing on the session's START rather than on the doc's timestamp keeps
+    the doc folded into its session when the run outlives that session: compression can end
+    a session mid-run and the doc is only written at the true end of the run, which leaves
+    the doc's timestamp arbitrarily far past ``ended_at`` and outside the grace window.
+    """
+    return any(
+        _execution_contains(attempt, float(session.get("started_at") or 0)) for session in legacy
     )
 
 
