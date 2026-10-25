@@ -394,6 +394,39 @@ class TestExecutionGuidanceInjection:
             "deepseek/deepseek-v4-pro", valid_tool_names=())
 
 
+_BARE_K3_MODEL_IDS = ("k3", "k3.1-pro", "k3-256k", "kimi-coding/k3.1-pro")
+
+
+class TestBareKimiK3ModelGating:
+    """Regression for #144306: the Kimi Coding provider serves bare K3 model ids
+    (``k3``, ``k3.1-pro``, ``k3-256k``). They carry neither ``kimi`` nor any other
+    auto-list substring, so both model-gated prompt layers resolved OFF on
+    ``auto`` and a turn could end in prose with no tool call.
+    """
+
+    def _prompt(self, model):
+        agent = _make_agent(
+            valid_tool_names=["terminal", "read_file"],
+            model=model,
+            _tool_use_enforcement="auto",
+            _execution_guidance="auto",
+        )
+        return _stable_prompt(agent)
+
+    @pytest.mark.parametrize("model", _BARE_K3_MODEL_IDS)
+    def test_bare_k3_id_gets_execution_guidance_by_default(self, model):
+        assert "Execution discipline" in self._prompt(model)
+
+    @pytest.mark.parametrize("model", _BARE_K3_MODEL_IDS)
+    def test_bare_k3_id_gets_tool_use_enforcement_by_default(self, model):
+        assert "Tool-use enforcement" in self._prompt(model)
+
+    def test_unlisted_family_keeps_tool_use_enforcement_off(self):
+        # Control: the tuple stays a family allowlist — a model that was never
+        # added (Claude) must not pick the block up as a side effect.
+        assert "Tool-use enforcement" not in self._prompt("anthropic/claude-opus-4.8")
+
+
 class TestNamedProfileHintIntegration:
     """The same defect through the REAL resolution chain (#72894).
 

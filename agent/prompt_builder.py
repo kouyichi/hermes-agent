@@ -354,12 +354,13 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 )
 
 # "muse" = Meta Muse Spark: on defaults it answers in prose with 0 tool calls and the turn closes on
-# finish_reason=stop (#96550).
+# finish_reason=stop (#96550). "k3" = the Kimi Coding provider's bare K3 ids (k3, k3.1-pro, k3-256k),
+# which carry no "kimi" substring (#144306).
 # "nemotron" is deliberately absent from this list and EXECUTION_GUIDANCE_MODELS. We ran Nemotron 3.5 Super VL 5 times
 # with the tool-use enforcement, execution guidance and Google operational guidance blocks forced on and 5 times with
 # them off: pass rate moved by under 1 point on SWE-bench Verified, SWE-bench Pro and GDPval, and by +3.7 points on
 # Terminal-Bench 2.1, which was not significant per task (p = 0.14).
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek", "muse")
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek", "muse", "k3")
 
 # Models that receive OPENAI_MODEL_EXECUTION_GUIDANCE when agent.execution_guidance is "auto" (agentic-eval
 # traces showed the same failure modes; Muse Spark stops after a chat-only turn on defaults). Gemini/Gemma get
@@ -372,10 +373,11 @@ TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm",
 # traces showed the same failure modes on those families (financial math in prose, no read-back after
 # external writes, identifier "repair", completeness claims despite count mismatches). GLM's
 # tool-calls-as-plain-text stall (#53847) and MiMo (#41874) are covered here too. Gemini/Gemma are excluded
-# — they get the more specific GOOGLE_MODEL_OPERATIONAL_GUIDANCE block instead.
+# — they get the more specific GOOGLE_MODEL_OPERATIONAL_GUIDANCE block instead. "k3" covers the Kimi Coding
+# provider's bare K3 ids, which never contain "kimi" (#144306).
 EXECUTION_GUIDANCE_MODELS = (
     "gpt", "codex", "grok",
-    "deepseek", "kimi", "qwen", "glm", "minimax", "mimo", "mistral", "muse",
+    "deepseek", "kimi", "k3", "qwen", "glm", "minimax", "mimo", "mistral", "muse",
 )
 
 # Universal "finish the job" guidance (ALL models): don't stop after a stub, never
