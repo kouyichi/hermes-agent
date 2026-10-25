@@ -1169,7 +1169,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
                   prepared.legacyAttempted = true
                   await writePreparedSubmission(retryKey, prepared)
-                  const { submission_id: _id, ...legacyParams } = params
+                  // Both canonical-only keys go: the legacy contract declares neither, and staging
+                  // already queued the images for the next turn (#144186).
+                  const { attachments: _images, submission_id: _id, ...legacyParams } = params
 
                   const result = await requestGateway<SubmitReceipt>(
                     'prompt.submit',
