@@ -194,13 +194,21 @@ class GatewaySessionAgentMixin:
         ctx = self._ctx
         runner = self._runner
         skip_context_files = self._skip_context_files(platform_key)
-        sig = runner._agent_config_signature(
-            turn_route["model"], turn_route["runtime"], ctx.enabled_toolsets, combined_ephemeral,
-            cache_keys=runner._extract_cache_busting_config(ctx.user_config),
-            user_id=getattr(ctx.source, "user_id", None),
-            user_id_alt=getattr(ctx.source, "user_id_alt", None),
-            skip_context_files=skip_context_files,
-        )
+
+        def _signature() -> str:
+            """This turn's cache key, read live. Building the agent can itself move these inputs: a
+            memory provider's ``register(ctx)`` registers its tools, which bumps
+            ``registry._generation`` (#144442). Storing a pre-build signature therefore caches the
+            entry under a key its own build already invalidated, and every turn rebuilds."""
+            return runner._agent_config_signature(
+                turn_route["model"], turn_route["runtime"], ctx.enabled_toolsets, combined_ephemeral,
+                cache_keys=runner._extract_cache_busting_config(ctx.user_config),
+                user_id=getattr(ctx.source, "user_id", None),
+                user_id_alt=getattr(ctx.source, "user_id_alt", None),
+                skip_context_files=skip_context_files,
+            )
+
+        sig = _signature()
         cache_lock = getattr(runner, "_agent_cache_lock", None)
         cache = getattr(runner, "_agent_cache", None)
         peek_sid, dead = self._cached_sid_is_dead(cache_lock, cache)
@@ -225,6 +233,9 @@ class GatewaySessionAgentMixin:
                 turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr, skip_context_files,
             )
             if cache_lock and cache is not None:
+                # Re-read the key AFTER the build: the entry must be stored under the inputs its
+                # build ended with, not the ones it started from (#144442).
+                sig = _signature()
                 with cache_lock:
                     # Record the snapshot's session_id with message_count so the cross-process guard
                     # can skip the meaningless count comparison if the active session_id switches.
