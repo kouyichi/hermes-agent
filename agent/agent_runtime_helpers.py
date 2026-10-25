@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from hermes_cli.timeouts import get_provider_request_timeout
 from agent.message_sanitization import (
-    _FULL_ARGS_LOG_BOUND, coalesce_tool_call_id, coerce_tool_name, tool_call_id_variants, tool_result_id_variants
+    _FULL_ARGS_LOG_BOUND, coalesce_tool_call_id, coerce_tool_name, repair_leading_role, tool_call_id_variants, tool_result_id_variants
 )
 from agent.message_metadata import (
     TOOL_CALL_UIDS, merge_tool_call_uids, per_occurrence_tool_call_uids, record_absorbed_message)
@@ -3151,7 +3151,7 @@ def sanitize_api_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]
     messages = _drop_results_without_ids(messages)
     messages = _pair_tool_calls_positionally(messages)
     messages = _dedupe_tool_call_ids(messages)
-    return _realign_tool_result_names(messages)
+    return repair_leading_role(_realign_tool_result_names(messages))
 
 
 _ACK_FUTURE_RE = re.compile(r"\b(i['’]ll|i will|let me|i can do that|i can help with that)\b")

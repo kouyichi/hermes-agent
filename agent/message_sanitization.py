@@ -312,6 +312,39 @@ def close_interrupted_tool_sequence(messages: list, final_response: Any = None) 
     return True
 
 
+# Header roles the OpenAI wire format accepts ahead of the conversation proper. GPT-5/Codex
+# routes rename ``system`` to ``developer`` on the per-call copy, so both count as headers here.
+_HEADER_ROLES = frozenset({"system", "developer"})
+
+# Honest, non-empty text for the synthesized opening user turn: a blank row trades the
+# leading-role 400 for the empty-content one (same lesson as ``_EMPTY_TEXT_PLACEHOLDER``).
+_LEADING_USER_PLACEHOLDER = (
+    "[Earlier conversation turns were compacted; continue from the summary below.]"
+)
+
+
+def repair_leading_role(messages: list) -> list:
+    """Prepend a placeholder user turn when the first conversation row is not ``user``.
+
+    Local chat templates reject the shape outright — LM Studio/Qwen answers "Error rendering
+    prompt with jinja template: No user query found in messages." for
+    ``system,assistant,tool,user`` (``tool`` included, so "assistant-led" is too narrow). The
+    Anthropic converter (``_ensure_leading_user_turn``) and the Bedrock adapter already pad the
+    head; this is the same repair for the OpenAI-compatible path every local server uses, where a
+    twice-compacted transcript can keep assistant/tool rounds at the head while the summary (a
+    ``user`` row) lands last. Such a 400 is classified non-retryable, so the session never heals
+    on its own. Insertion (not deletion) keeps tool pairing intact, and returning an untouched
+    list when the head is already a user row keeps well-formed requests byte-identical for
+    prompt caching. Per-call copy only — callers pass the wire list, never stored history.
+    """
+    head = next((idx for idx, msg in enumerate(messages) if msg.get("role") not in _HEADER_ROLES), None)
+    if head is None or messages[head].get("role") == "user":
+        return messages
+    repaired = list(messages)
+    repaired.insert(head, {"role": "user", "content": _LEADING_USER_PLACEHOLDER})
+    return repaired
+
+
 # finish_reason wire normalization. Some OpenAI-compatible gateways fronting
 # Gemini backends emit the native uppercase reasons (STOP, MAX_TOKENS); every
 # downstream comparison uses the lowercase OpenAI literals, so an uppercase

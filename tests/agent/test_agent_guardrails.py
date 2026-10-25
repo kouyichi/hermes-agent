@@ -64,17 +64,17 @@ class TestSanitizeApiMessages:
             tool_result("c_ORPHAN"),
         ]
         out = AIAgent._sanitize_api_messages(msgs)
-        assert len(out) == 2
-        assert all(m.get("tool_call_id") != "c_ORPHAN" for m in out)
+        ids = [m.get("tool_call_id") for m in out if m.get("role") == "tool"]
+        assert ids == ["c1"]
 
     def test_orphaned_call_gets_stub_result(self):
         msgs = [
             {"role": "assistant", "tool_calls": [assistant_dict_call("c2")]},
         ]
         out = AIAgent._sanitize_api_messages(msgs)
-        assert len(out) == 2
-        stub = out[1]
-        assert stub["role"] == "tool"
+        stubs = [m for m in out if m.get("role") == "tool"]
+        assert len(stubs) == 1
+        stub = stubs[0]
         assert stub["tool_call_id"] == "c2"
         assert stub["content"]
 
@@ -116,11 +116,12 @@ class TestSanitizeApiMessages:
         out = AIAgent._sanitize_api_messages(
             [dict(stored), {**tool_result("c1"), "name": "multi_tool_use.parallel"}, tool_result("c2")]
         )
-        names = [tc["function"]["name"] for tc in out[0]["tool_calls"]]
+        message = next(m for m in out if m.get("role") == "assistant")
+        names = [tc["function"]["name"] for tc in message["tool_calls"]]
         assert names == ["multi_tool_use_parallel", "terminal"]
-        assert out[0]["tool_calls"][1] is stored["tool_calls"][1]
+        assert message["tool_calls"][1] is stored["tool_calls"][1]
         assert stored_call["function"]["name"] == "multi_tool_use.parallel"
-        assert out[1]["name"] == "multi_tool_use_parallel"
+        assert next(m for m in out if m.get("tool_call_id") == "c1")["name"] == "multi_tool_use_parallel"
 
     def test_invalid_sdk_object_tool_call_name_coerced_without_mutation(self):
         """An SDK-object tool call with an invalid name is replaced by a dict copy on the per-call
@@ -129,7 +130,7 @@ class TestSanitizeApiMessages:
         tc_obj = types.SimpleNamespace(id="c1", function=fn)
         stored = {"role": "assistant", "tool_calls": [tc_obj]}
         out = AIAgent._sanitize_api_messages([dict(stored), tool_result("c1")])
-        assert out[0]["tool_calls"][0] == {
+        assert next(m for m in out if m.get("role") == "assistant")["tool_calls"][0] == {
             "id": "c1", "type": "function",
             "function": {"name": "multi_tool_use_parallel", "arguments": '{"x": 1}'},
         }
@@ -145,8 +146,7 @@ class TestSanitizeApiMessages:
             {"role": "assistant", "tool_calls": [tc_obj]},
         ]
         out = AIAgent._sanitize_api_messages(msgs)
-        assert len(out) == 2
-        assert out[1]["tool_call_id"] == "c6"
+        assert out[-1]["tool_call_id"] == "c6"
 
 
 # ---------------------------------------------------------------------------
