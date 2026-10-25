@@ -5351,14 +5351,14 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Alternate against head first, then tail; None (all-exempt head) means "user".
         summary_role = "user" if last_head_role in {None, "assistant", "tool"} or force_user_leading else "assistant"
         merge_into_tail = False
-        # Flip on a tail collision only if that doesn't collide with the head. All-exempt head pins "user";
-        # flipping would open the visible sequence with "assistant". Neither alternates: merge into the first tail row.
+        # Flip on a tail collision only if that doesn't collide with the head; an all-exempt head pins "user",
+        # so merge into the first tail row — except an EMPTY head, which keeps the summary leading (#144167).
         if first_tail_role is not None and summary_role == first_tail_role:
             flipped = "assistant" if summary_role == "user" else "user"
             if flipped != last_head_role and last_head_role is not None and not force_user_leading:
                 summary_role = flipped
             else:
-                merge_into_tail = bool(tail_messages)
+                merge_into_tail = bool(tail_messages) and bool(compressed)
         return summary_role, merge_into_tail, force_user_leading, first_tail_visible_idx
 
     def _merge_summary_into_tail_row(
