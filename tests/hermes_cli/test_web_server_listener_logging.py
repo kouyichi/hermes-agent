@@ -13,10 +13,18 @@ import pytest
 
 import hermes_cli.web_server as ws_mod
 import hermes_logging
+from hermes_cli import web_server_lifecycle as lifecycle
 from hermes_cli.web_server_lifecycle import build_listener_server
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
 _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi")
+
+
+def _clear_uvicorn_handlers() -> None:
+    """Force the "first listener in this process" branch: the console install is a no-op while a
+    handler from an earlier listener is still attached."""
+    for name in _UVICORN_LOGGERS:
+        logging.getLogger(name).handlers[:] = []
 
 
 @pytest.fixture(autouse=True)
@@ -100,3 +108,43 @@ def test_listener_config_keeps_uvicorn_on_the_console_and_out_of_the_hermes_logs
     agent_log = (root / "logs" / "agent.log").read_text(encoding="utf-8-sig")
     assert "hermes-file-warning" in agent_log
     assert "uvicorn-console-warning" not in agent_log and "/access-line" not in agent_log
+
+
+def test_a_listener_builds_with_no_console_at_all(monkeypatch):
+    """Windows ``pythonw`` / a detached service has ``sys.stdout is None`` and ``sys.stderr is None``
+    (CPython), and uvicorn's formatters read ``sys.stdout.isatty()`` at construction while
+    ``logging.StreamHandler(None)`` adopts the same None stream and raises on the first emit. Both
+    used to kill the gateway in a crash loop before any adapter started (#144932)."""
+    import sys as _sys
+
+    _clear_uvicorn_handlers()
+    monkeypatch.setattr(_sys, "stdout", None)
+    monkeypatch.setattr(_sys, "stderr", None)
+
+    lifecycle._uvicorn_console_logging()
+
+    for name in ("uvicorn", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        assert logger.handlers == [], f"{name} kept a handler on a stream that does not exist"
+        assert logger.propagate is False, f"{name} must not fall through into the Hermes log files"
+    logging.getLogger("uvicorn.error").warning("no-console-warning")  # the emit-time trap
+
+
+def test_a_listener_builds_with_one_console_stream(monkeypatch):
+    """Only the missing stream is skipped: ``pythonw`` can leave one of the two unauthored, and the
+    surviving logger keeps its console handler (on the stream it was built for)."""
+    import io
+    import sys as _sys
+
+    _clear_uvicorn_handlers()
+    stdout = io.StringIO()
+    monkeypatch.setattr(_sys, "stdout", stdout)
+    monkeypatch.setattr(_sys, "stderr", None)
+
+    lifecycle._uvicorn_console_logging()
+
+    assert logging.getLogger("uvicorn").handlers == []
+    access = logging.getLogger("uvicorn.access")
+    assert len(access.handlers) == 1
+    access.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:50000", "GET", "/access-line", "1.1", 200)
+    assert "/access-line" in stdout.getvalue()

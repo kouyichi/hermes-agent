@@ -532,15 +532,23 @@ def _uvicorn_console_logging() -> None:
     from uvicorn.logging import AccessFormatter, DefaultFormatter
 
     formats = LOGGING_CONFIG["formatters"]
-    for name, stream, formatter in (
-        ("uvicorn", sys.stderr, DefaultFormatter(formats["default"]["fmt"])),
-        ("uvicorn.access", sys.stdout, AccessFormatter(formats["access"]["fmt"])),
+    for name, stream, formatter_cls, fmt in (
+        ("uvicorn", sys.stderr, DefaultFormatter, formats["default"]["fmt"]),
+        ("uvicorn.access", sys.stdout, AccessFormatter, formats["access"]["fmt"]),
     ):
         logger = logging.getLogger(name)
         logger.propagate = False
+        # No console on this stream (Windows pythonw / a detached service: CPython sets the missing
+        # stdio to None). uvicorn's ColourizedFormatter reads sys.stdout.isatty() when use_colors is
+        # unset, and StreamHandler(None) adopts the same None stream and raises on the first emit --
+        # both crashed the gateway before any adapter started (#144932).
+        if stream is None:
+            continue
         if not logger.handlers:  # a second listener in this process keeps the first one's
             handler = logging.StreamHandler(stream)
-            handler.setFormatter(formatter)
+            # Passed explicitly: the formatter must judge the stream it actually writes to, and the
+            # default would read sys.stdout even for the stderr handler.
+            handler.setFormatter(formatter_cls(fmt, use_colors=getattr(stream, "isatty", lambda: False)()))
             logger.addHandler(handler)
     # LOGGING_CONFIG's level for the parent; uvicorn.Config sets only the child loggers' levels.
     logging.getLogger("uvicorn").setLevel(logging.INFO)
