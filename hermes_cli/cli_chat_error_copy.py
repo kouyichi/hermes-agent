@@ -8,6 +8,8 @@ and demote the raw provider text to a ``Details:`` line. Copy lives in the i18n 
 
 from __future__ import annotations
 
+from typing import Any
+
 from agent.i18n import t
 
 _SUMMARY_LIMIT = 120
@@ -37,10 +39,11 @@ def refusal_text(error: BaseException | str) -> str:
     """The refusal as the client shows it: the reason code, plus the check that fired when the owner
     named one (``invalid_params (toolsets: unknown or invalid toolset name: 'mcp-codegraph')``).
 
-    The gateway sends ``field``/``detail`` in the JSON-RPC error's ``data``
-    (``gateway/session_controls.py``), and ``hermes_cli.gateway_client.rpc_error`` carries the
-    bounded scalars onto ``GatewayRPCError.data``. A refusal from anywhere else has no ``data`` and
-    reads exactly as before."""
+    The gateway sends two spellings of that naming in the JSON-RPC error's ``data``: handler-owned
+    refusals carry the singular ``field``/``detail`` (``gateway/session_controls.py``), while the
+    canonical dispatcher's closed-key-set refusal carries ``fields`` — a list of key paths
+    (``canonical_param_problems``). Both are read here, so a refusal names its check whichever lane
+    it came from. A refusal with no ``data`` reads exactly as before."""
     if str(error) == "launch_credentials_unavailable":
         # The chat's launch key changed: every retry repeats the refusal, so name the way out.
         from agent.turn_failure_copy import launch_credentials_copy
@@ -49,9 +52,20 @@ def refusal_text(error: BaseException | str) -> str:
     data = getattr(error, "data", None)
     data = data if isinstance(data, dict) else {}
     field, detail = str(data.get("field") or "").strip(), str(data.get("detail") or "").strip()
+    if not field:
+        field, detail = _fields_refusal(data.get("fields"), detail)
     if not field and not detail:
         return str(error)
     return f"{error} ({field or 'unnamed field'}{': ' + detail if detail else ''})"
+
+
+def _fields_refusal(fields: Any, detail: str) -> tuple[str, str]:
+    """The canonical dispatcher's aggregate refusal as the singular pair: the refused key paths,
+    comma-joined when several were refused, plus the wire's own detail when it sent one. The
+    dispatcher sends key paths only and never a detail, so joining them here keeps the panel from
+    reading ``(model: unknown or refused keys: model, toolsets)``."""
+    names = [str(item).strip() for item in fields if str(item).strip()] if isinstance(fields, list) else []
+    return ", ".join(names), detail
 
 
 def chat_error_response(
@@ -89,8 +103,22 @@ def agent_init_failure_message(error: BaseException) -> str:
 
     A gateway that cannot be reached keeps its whole first line: its discovery detail is already
     bounded (``DiscoveryError.bounded_detail``) and ends in the repair command, which the summary
-    limit would cut mid-path."""
-    from hermes_cli.gateway_client import GatewayUnavailableError
+    limit would cut mid-path.
+
+    A ``session.create``/``resume`` refusal (``invalid_params`` from the owner) never reached a
+    provider, so it takes its own line: the agent-init copy sends the user to ``hermes doctor`` and
+    ``/model``, neither of which can fix a launch-policy refusal (#145286)."""
+    from hermes_cli.gateway_client import GatewayRPCError, GatewayUnavailableError
 
     limit = None if isinstance(error, GatewayUnavailableError) else _SUMMARY_LIMIT
-    return t("cli.error.agent_init_failed", error=_short(refusal_text(error), limit) or type(error).__name__)
+    refusal = _short(refusal_text(error), limit) or type(error).__name__
+    key = "cli.error.session_refused" if _is_params_refusal(error) else "cli.error.agent_init_failed"
+    return t(key, error=refusal)
+
+
+def _is_params_refusal(error: BaseException) -> bool:
+    """The owner's bounded ``invalid_params``: the session request was refused by a launch check
+    (the canonical key set or a policy check) rather than by a provider."""
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    return isinstance(error, GatewayRPCError) and str(error) == "invalid_params"

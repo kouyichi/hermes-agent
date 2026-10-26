@@ -3193,6 +3193,7 @@ cli:
     the_current_model: "geçerli model"
     with_details: "{lead}\nAyrıntılar: {details}"
     agent_init_failed: "Hermes model bağlantısını başlatamadı: {error}. Mesajınız gönderilmedi. Kurulumu denetlemek için `hermes doctor` çalıştırın veya farklı bir sağlayıcı seçmek için /model kullanın."
+    session_refused: "Hermes oturum isteğini reddetti: {error}. Mesajınız gönderilmedi. Belirtilen alanı düzeltip yeniden gönderin."
   gateway:
     starting: "Hermes Gateway başlatılıyor (mesajlaşma platformları)..."
   gateway_status:

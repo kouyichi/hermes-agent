@@ -152,6 +152,35 @@ async def test_the_frame_carries_the_field_and_the_gateway_logs_it(tmp_path, cap
 
 
 @pytest.mark.asyncio
+async def test_a_closed_key_set_refusal_reaches_the_panel_by_key_path(tmp_path):
+    """End to end: the canonical gate refuses an unknown ``session.create`` key, the client's bounded
+    ``error.data`` carries it as ``fields``, and the panel names the key instead of blaming the model
+    connection (#145286)."""
+    from gateway.session_authority import SessionAuthority
+    from gateway.session_controls import AuthorityConnection
+    from hermes_cli.cli_chat_error_copy import agent_init_failure_message
+    from hermes_cli.gateway_client import rpc_error
+    from hermes_state import SessionDB
+    from hermes_state_runtime import begin_runtime_epoch
+
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    try:
+        epoch = begin_runtime_epoch(db, instance_id='test')
+        authority = SessionAuthority(SimpleNamespace(), profile_id='test', instance_id='test',
+                                     db=db, epoch=epoch)
+        connection = AuthorityConnection(authority, object(), {'user_id': 'human'})
+        reply = await connection.dispatch({'id': 9, 'method': 'session.create',
+                                          'params': {'source': 'cli', 'bogus_launch_key': 1}})
+        assert reply['error']['message'] == 'invalid_params'
+        assert reply['error']['data']['fields'] == ['bogus_launch_key'], reply
+        message = agent_init_failure_message(rpc_error(reply['error']))
+        assert 'bogus_launch_key' in message, message
+        assert 'model connection' not in message, message
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_a_bare_refusal_does_not_warn(tmp_path, caplog):
     """A retrying client must not be able to flood the log: only a named refusal is a warning."""
     from gateway.session_authority import SessionAuthority
@@ -241,6 +270,62 @@ def test_an_unusable_server_spec_never_echoes_its_values(tmp_path):
     refusal = _refusal({'cwd': str(tmp_path), 'source': 'acp', 'editor': {'mcp_servers': [spec]}})
     assert refusal.field == 'editor.mcp_servers' and 'args' in refusal.detail
     assert 'SECRET' not in refusal.detail and '\n' not in refusal.detail
+
+
+def test_the_canonical_field_list_reaches_the_cli_copy():
+    """The canonical dispatcher refuses a closed key set with ``data.fields`` (a list of key paths,
+    ``gateway/session_controls.py``); handler-owned refusals send the singular ``field``/``detail``
+    pair. The CLI read only the singular spelling, so a contract refusal printed the bare code and
+    the user was sent to ``hermes doctor`` / ``/model`` for a session-policy refusal (#145286)."""
+    from hermes_cli.cli_chat_error_copy import agent_init_failure_message
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    exc = GatewayRPCError('invalid_params', 4001, {'reason': 'invalid_params', 'fields': ['source']})
+    assert 'source' in agent_init_failure_message(exc)
+
+
+def test_a_single_field_list_does_not_repeat_itself():
+    """One key path is the field itself: no synthesized detail beside it."""
+    from hermes_cli.cli_chat_error_copy import refusal_text
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    assert refusal_text(GatewayRPCError('invalid_params', 4001, {
+        'reason': 'invalid_params', 'fields': ['source']})) == 'invalid_params (source)'
+
+
+def test_a_multi_field_contract_refusal_names_every_key():
+    """The aggregate is the only place the second key lives: name all of them, in wire order."""
+    from hermes_cli.cli_chat_error_copy import refusal_text
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    text = refusal_text(GatewayRPCError('invalid_params', 4001, {
+        'reason': 'invalid_params', 'fields': ['source', 'params.model']}))
+    assert text == 'invalid_params (source, params.model)', text
+
+
+def test_a_params_refusal_does_not_blame_the_model_connection():
+    """A ``session.create``/``resume`` refusal never reached a provider, so the provider-oriented
+    catalog line is the wrong repair advice for it (#145286)."""
+    from agent.i18n import t
+    from hermes_cli.cli_chat_error_copy import agent_init_failure_message
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    exc = GatewayRPCError('invalid_params', 4001, {'reason': 'invalid_params', 'fields': ['source']})
+    message = agent_init_failure_message(exc)
+    assert message == t('cli.error.session_refused', error='invalid_params (source)')
+    assert message != t('cli.error.agent_init_failed', error='invalid_params (source)')
+
+
+def test_a_provider_side_failure_keeps_the_agent_init_copy():
+    """Everything that is not a params refusal keeps the copy it had."""
+    from agent.i18n import t
+    from hermes_cli.cli_chat_error_copy import agent_init_failure_message
+    from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError
+
+    assert agent_init_failure_message(GatewayClientError('auth_failed')) == \
+        t('cli.error.agent_init_failed', error='auth_failed')
+    assert agent_init_failure_message(GatewayRPCError('storage_unavailable', 5001, {})) == \
+        t('cli.error.agent_init_failed', error='storage_unavailable')
 
 
 def test_a_bypass_launch_never_reads_profile_plugin_state(tmp_path, monkeypatch):
