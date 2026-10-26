@@ -3,15 +3,21 @@
 
 import logging
 import asyncio
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 from hermes_state_common import _RESET_CHILD_SQL, _sql_json_extract
 
 # Same logger the code used before extraction (record parity).
 _log = logging.getLogger("hermes_cli.web_server")
+
+# One reentrant queue per canonical profile home: this process's offline maintenance of a home
+# takes ``gateway.lock`` once at a time (see ``_session_maintenance_queue``).
+_maintenance_queue: dict[Path, threading.RLock] = {}
+_maintenance_queue_guard = threading.Lock()
 
 _DESCENDANTS_SQL = f"""
             WITH RECURSIVE descendants(id, parent_session_id, started_at) AS (
@@ -313,6 +319,22 @@ async def _mutate_session_request(request, profile, session_id, *, request_id,
         raise HTTPException(status_code=503, detail='storage_unavailable') from exc
 
 
+def _session_maintenance_queue(home):
+    """This process's own offline maintenance of *home*, one holder at a time.
+
+    ``exclusive_maintenance`` reserves ``gateway.lock`` through a fresh ``ProfileOwnership`` per
+    outermost call, and flock belongs to the open file: two offline session edits served at once by
+    one ``hermes serve`` (uvicorn parks each on ``asyncio.to_thread``) refuse each other with the
+    gateway's wording although no gateway runs, and the dashboard's client reads that as a lost edit
+    (#145242). Queue them here instead; a home another process owns still answers 409. Reentrant so
+    nested offline maintenance in one thread keeps reserving through the same single reservation.
+    """
+    from gateway.runtime_ownership import canonical_home
+    key = canonical_home(home)
+    with _maintenance_queue_guard:
+        return _maintenance_queue.setdefault(key, threading.RLock())
+
+
 def _with_session_maintenance(profile, operation, *args):
     """Offline bulk actions reserve the exact owner lock through final DB close."""
     from fastapi import HTTPException
@@ -322,7 +344,7 @@ def _with_session_maintenance(profile, operation, *args):
 
     home = Path(_cron_profile_home(profile)[1]) if profile else Path(_default_db_path()).parent
     try:
-        with exclusive_maintenance([home]):
+        with _session_maintenance_queue(home), exclusive_maintenance([home]):
             return operation(*args)
     except OwnershipConflict as exc:
         # uvicorn runs at log_level=warning, so a handled 4xx leaves no server-side trace and the
