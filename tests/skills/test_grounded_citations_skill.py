@@ -548,3 +548,86 @@ def test_stats_reports_provenance_total_matching_coverage(sources_mod, ledger: P
     stats = warnings[0]
     # 4 sentences, 3 with provenance (the both-marked sentence counts once).
     assert "4 prose sentence(s), 3 with declared provenance (75%)" in stats
+
+
+# ---------------------------------------------------------------------------
+# Scripts written without spaces between words
+# ---------------------------------------------------------------------------
+
+# Japanese and Chinese put no spaces between words, so a whole sentence arrives
+# as a single whitespace "word": the quote floor and the coverage gate both have
+# to measure these scripts in characters and split their sentences on 。！？,
+# or the gate passes over a draft it never measured.
+_JA_PAGE = (
+    "料金プラン\n"
+    "料金は月額2,000円で、学生は半額になります。\n"
+    "無料体験は14日間あります。\n"
+)
+_ZH_PAGE = (
+    "资费说明\n"
+    "月费为2,000日元，学生可享半价优惠。\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("evidence", "quote"),
+    [
+        (_JA_PAGE, "料金は月額2,000円で、学生は半額になります。"),
+        (_ZH_PAGE, "月费为2,000日元，学生可享半价优惠。"),
+    ],
+)
+def test_quote_accepts_a_sentence_without_word_spaces(
+    sources_mod, ledger: Path, evidence: str, quote: str
+) -> None:
+    sources_mod.add_sources(ledger, ["https://a.example"])
+    entry = sources_mod.attach_quote(ledger, 1, quote, evidence)
+    assert [q["text"] for q in entry["quotes"]] == [quote]
+
+
+def test_quote_still_rejects_a_fragment_without_word_spaces(
+    sources_mod, ledger: Path
+) -> None:
+    sources_mod.add_sources(ledger, ["https://a.example"])
+    with pytest.raises(SystemExit) as exc:
+        sources_mod.attach_quote(ledger, 1, "料金は", _JA_PAGE)
+    assert "too short" in str(exc.value)
+
+
+def test_quote_rejects_a_fabricated_sentence_without_word_spaces(
+    sources_mod, ledger: Path
+) -> None:
+    sources_mod.add_sources(ledger, ["https://a.example"])
+    with pytest.raises(SystemExit) as exc:
+        sources_mod.attach_quote(ledger, 1, "料金は月額3,000円で、学生は全額になります。", _JA_PAGE)
+    assert "not found verbatim" in str(exc.value)
+
+
+def test_verify_measures_coverage_of_a_draft_without_word_spaces(
+    sources_mod, ledger: Path, tmp_path: Path
+) -> None:
+    """The uncited third sentence has to count, or --min-coverage passes blind."""
+    _seed(sources_mod, ledger)
+    text = (
+        "# 料金\n\n"
+        "料金は月額2,000円です[1]。学生は半額になります[1]。無料体験は14日間あります。\n\n"
+        "Sources:\n[1] https://a.example\n"
+    )
+    code, errors, warnings = _verify(sources_mod, ledger, tmp_path, text, min_coverage=0.9)
+    assert "3 prose sentence(s), 2 with declared provenance (67%)" in warnings[0]
+    assert code == 1
+    assert any("coverage" in e for e in errors)
+
+
+def test_verify_splits_on_full_width_terminators(sources_mod) -> None:
+    sentences = sources_mod._sentences(
+        "このプランは本当にお得ですか？はい、学生なら半額になります！"
+        "まずは無料体験をお試しください。"
+    )
+    assert len(sentences) == 3
+    assert sentences[0].startswith("このプランは") and sentences[1].startswith("はい")
+
+
+def test_sentence_split_keeps_a_decimal_number_whole(sources_mod) -> None:
+    """Adding a no-whitespace split must not cut `3.5` in half."""
+    sentences = sources_mod._sentences("The plan costs 3.5 dollars per month.")
+    assert sentences == ["The plan costs 3.5 dollars per month."]

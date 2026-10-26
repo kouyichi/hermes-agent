@@ -234,6 +234,35 @@ def _normalize_ws(text: str) -> str:
     return " ".join((text or "").split())
 
 
+# Scripts written without spaces between words: Han, kana, and Thai.  A whole
+# Japanese sentence there is a single whitespace "word", so word counts read
+# every quote and every sentence as too short and the coverage gate measures
+# nothing.  These scripts carry about a word of meaning per character, so a
+# character floor — ten, roughly the shortest run that still holds a clause —
+# stands in for the word count, and a sentence can end without a space after
+# its terminator.
+_UNSPACED_SCRIPT_CHARS = (
+    "\u0e00-\u0e7f\u3005\u3040-\u30ff"  # Thai, ideographic iteration mark, kana
+    "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"  # Han
+)
+_UNSPACED_SCRIPT_RE = re.compile(f"[{_UNSPACED_SCRIPT_CHARS}]")
+_MIN_UNSPACED_CHARS = 10
+
+
+def _long_enough(text: str, min_words: int) -> bool:
+    """True when ``text`` is long enough to count as a quote or prose sentence.
+
+    Space-delimited text is measured in words.  Text carrying a script that is
+    written without word spaces is measured in characters once it is too short
+    by word count, so its floor does not silently reject or skip it.
+    """
+    if len(text.split()) >= min_words:
+        return True
+    if not _UNSPACED_SCRIPT_RE.search(text):
+        return False
+    return len("".join(text.split())) >= _MIN_UNSPACED_CHARS
+
+
 # Markdown artifacts that retrieval tools inject into otherwise-identical prose.
 # ``web_extract`` returns markdown, so the most citation-worthy sentences are
 # exactly the ones carrying inline links and emphasis around terms:
@@ -269,8 +298,11 @@ def attach_quote(path: Path, source_id: int, quote: str, evidence: str) -> dict[
     a quote the page does not contain is exactly the fabrication this guards
     against."""
     quote = (quote or "").strip()
-    if len(_normalize_ws(quote).split()) < 3:
-        raise SystemExit("error: quote too short — use at least 3 words of verbatim text")
+    if not _long_enough(_normalize_ws(quote), 3):
+        raise SystemExit(
+            "error: quote too short — use at least 3 words of verbatim text "
+            "(or 10 characters of a script written without spaces)"
+        )
     if not quote_in_evidence(quote, evidence):
         raise SystemExit(
             "error: quote not found verbatim in the evidence text — "
@@ -391,9 +423,14 @@ def _sentences(prose: str) -> list[str]:
             continue
         if stripped.startswith(">"):
             stripped = stripped.lstrip("> ").strip()
-        for part in re.split(r"(?<=[.!?])\s+", stripped):
+        # A sentence ends on ASCII terminators before whitespace, and on a
+        # full-width terminator whether or not a space follows it (。学生) —
+        # but never on a decimal point, hence the ASCII-only lookahead.
+        for part in re.split(
+            rf"(?<=[.!?。！？])(?:\s+|(?=[{_UNSPACED_SCRIPT_CHARS}]))", stripped
+        ):
             part = part.strip()
-            if len(part.split()) >= 4:
+            if _long_enough(part, 4):
                 out.append(part)
     return out
 

@@ -209,9 +209,12 @@ to stdout instead. Both emit the heading `## Sources` (`--style plain` emits
 `sentences with declared provenance / prose sentences`. A prose sentence is a
 non-empty line fragment of 4+ words after the Sources block, headings (`#`),
 table rows (`|`), and fenced code are dropped; blockquote markers are stripped.
-Provenance is declared by either a `[n]` citation or an `[unverified]` marker,
-so a sentence carrying both counts once. Run `verify` without a threshold first
-and read the `info: stats:` line to see the counts before picking a number.
+Text in a script written without word spaces (Chinese, Japanese, Thai) is
+measured in characters instead — 10 or more — and ends on `。！？` with no space
+required. Provenance is declared by either a `[n]` citation or an `[unverified]`
+marker, so a sentence carrying both counts once. Run `verify` without a
+threshold first and read the `info: stats:` line to see the counts before
+picking a number.
 
 ## Pitfalls
 
