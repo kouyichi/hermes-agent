@@ -1784,30 +1784,21 @@ def _sibling_profile_homes(invoking_home: Path) -> list[tuple[str, Path]]:
 
     The update's code swap and gateway fleet restart touch every profile,
     so the pre-update snapshot must too (#66140). The invoking profile is
-    excluded — its snapshot is taken by the existing call.
+    excluded — its snapshot is taken by the existing call. Enumeration goes
+    through the shared live-only walk, so a tombstoned husk a stale writer
+    re-created, or a marker-less side-effect dir, is never snapshotted (#144748).
     """
     homes: list[tuple[str, Path]] = []
     try:
-        from hermes_cli.profiles import (
-            _get_default_hermes_home,
-            _get_profiles_root,
-            _PROFILE_ID_RE,
-        )
+        from hermes_cli.profiles import _get_default_hermes_home, _iter_named_profile_dirs
 
         invoking = invoking_home.resolve()
         default_home = _get_default_hermes_home()
         if default_home.is_dir() and default_home.resolve() != invoking:
             homes.append(("default", default_home))
-        root = _get_profiles_root()
-        if root.is_dir():
-            for entry in sorted(root.iterdir()):
-                if (
-                    entry.is_dir()
-                    and entry.name != "default"
-                    and _PROFILE_ID_RE.match(entry.name)
-                    and entry.resolve() != invoking
-                ):
-                    homes.append((entry.name, entry))
+        for entry in _iter_named_profile_dirs():
+            if entry.resolve() != invoking:
+                homes.append((entry.name, entry))
     except Exception as exc:
         logger.debug("Sibling profile enumeration failed: %s", exc)
     return homes
