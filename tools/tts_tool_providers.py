@@ -69,6 +69,39 @@ def _config_bool(value: Any, default: bool = False) -> bool:
     return normalized in _TRUE_WORDS if normalized in _TRUE_WORDS | _FALSE_WORDS else default
 
 
+def _optional_setting_env(name: str) -> str:
+    """Read an optional provider SETTING (a base URL, a group id) — never a credential.
+
+    ``hermes_cli.config.get_env_value`` reads through the profile secret scope, which fails closed
+    with ``UnscopedSecretError`` when a multiplexed gateway serves a profile that runs without a
+    scope. The DEFAULT profile is exactly that case, and its own ``os.environ`` / ``.env`` IS its
+    value (same rule as ``gateway.platforms._shared.get_scoped_secret``), so an unscoped read here
+    falls back to it instead of failing the call: an unset optional setting must not cost the user
+    a voice reply (#145151). Credentials keep the fail-closed read in the provider key resolvers.
+    """
+    from agent.secret_scope import UnscopedSecretError
+    from hermes_cli.config import get_env_value, load_env
+
+    try:
+        return (get_env_value(name) or "").strip()
+    except UnscopedSecretError:
+        return (os.getenv(name) or load_env().get(name) or "").strip()
+
+
+def _gemini_base_url(gemini_config: dict[str, Any]) -> str:
+    """Gemini TTS endpoint: explicit config > ``GEMINI_BASE_URL`` > the documented default.
+
+    ONE resolution point for the sync provider and the streaming lane, so a scope-handling change
+    cannot fix one and leave the other failing (#145151).
+    """
+    from agent.gemini_native_adapter import normalize_gemini_base_url
+
+    return normalize_gemini_base_url(
+        gemini_config.get("base_url") or _optional_setting_env("GEMINI_BASE_URL")
+        or DEFAULT_GEMINI_TTS_BASE_URL,
+    )
+
+
 def _tts_response_format_from_path(output_path: str) -> str:
     """Pick an OpenAI-style response format (opus/wav/flac/mp3) from the output extension."""
     formats = ((".ogg", "opus"), (".wav", "wav"), (".flac", "flac"))
@@ -314,8 +347,8 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: dict[str, Any]) -
     if creds.get("provider") == "xai-oauth":
         base_url = creds.get("base_url")
     else:
-        from hermes_cli.config import get_env_value
-        base_url = xai_config.get("base_url") or creds.get("base_url") or get_env_value("XAI_BASE_URL")
+        base_url = (xai_config.get("base_url") or creds.get("base_url")
+                    or _optional_setting_env("XAI_BASE_URL"))
     base_url = str(base_url or DEFAULT_XAI_BASE_URL).strip().rstrip("/")
 
     # Documented minimal POST /v1/tts shape; optional fields only when they differ from defaults.
@@ -400,9 +433,8 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: dict[str, Any
     base_url = runtime.endpoint
     # MiniMax scopes TTS requests by GroupId (``?GroupId=<id>`` on the t2a_v2 URL): config or
     # MINIMAX_GROUP_ID, attached only when absent from the URL.
-    from hermes_cli.config import get_env_value
     group_id = (str(mm_config.get("group_id") or "").strip()
-                or (get_env_value("MINIMAX_GROUP_ID") or "").strip())
+                or _optional_setting_env("MINIMAX_GROUP_ID"))
     if group_id and "GroupId=" not in base_url:
         base_url = f"{base_url}{'&' if '?' in base_url else '?'}GroupId={group_id}"
     is_t2a_v2 = "t2a_v2" in base_url
@@ -567,11 +599,7 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: dict[str, Any]
     gemini_config = _section(tts_config, "gemini")
     model = str(gemini_config.get("model", DEFAULT_GEMINI_TTS_MODEL)).strip() or DEFAULT_GEMINI_TTS_MODEL
     voice = str(gemini_config.get("voice", DEFAULT_GEMINI_TTS_VOICE)).strip() or DEFAULT_GEMINI_TTS_VOICE
-    from hermes_cli.config import get_env_value
-    from agent.gemini_native_adapter import normalize_gemini_base_url
-    base_url = normalize_gemini_base_url(
-        gemini_config.get("base_url") or get_env_value("GEMINI_BASE_URL") or DEFAULT_GEMINI_TTS_BASE_URL,
-    )
+    base_url = _gemini_base_url(gemini_config)
     persona_prompt = _read_gemini_persona_prompt(gemini_config)
     tts_script = text
     if _gemini_audio_tags_enabled(gemini_config, model):

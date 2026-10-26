@@ -333,15 +333,11 @@ class GeminiStreamer(StreamingTTSProvider):
         import json as _json
         import requests
         from tools.tts_tool_providers import (
-            DEFAULT_GEMINI_TTS_BASE_URL, DEFAULT_GEMINI_TTS_MODEL, DEFAULT_GEMINI_TTS_VOICE)
-        from hermes_cli.config import get_env_value
+            DEFAULT_GEMINI_TTS_MODEL, DEFAULT_GEMINI_TTS_VOICE, _gemini_base_url)
         api_key = _gemini_key()
         model = str(self.section.get("model", DEFAULT_GEMINI_TTS_MODEL)).strip() or DEFAULT_GEMINI_TTS_MODEL
         voice = str(self.section.get("voice", DEFAULT_GEMINI_TTS_VOICE)).strip() or DEFAULT_GEMINI_TTS_VOICE
-        from agent.gemini_native_adapter import normalize_gemini_base_url
-        base_url = normalize_gemini_base_url(
-            self.section.get("base_url") or get_env_value("GEMINI_BASE_URL") or DEFAULT_GEMINI_TTS_BASE_URL,
-        )
+        base_url = _gemini_base_url(self.section)
         payload = {
             "contents": [{"parts": [{"text": text}]}],
             "generationConfig": {

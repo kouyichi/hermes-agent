@@ -195,6 +195,73 @@ class TestGenerateGeminiTts:
         assert "audio tag rewrite failed" in caplog.text
 
 
+class TestUnscopedOptionalSettingRead:
+    """An optional setting must never cost the voice reply on a multiplexed gateway (#145151).
+
+    ``hermes_cli.config.get_env_value`` reads through the profile secret scope, which fails closed
+    with ``UnscopedSecretError`` when multiplexing is on and no scope is bound — the DEFAULT
+    profile's state, since that profile deliberately runs unscoped and its own env is its value.
+    """
+
+    @staticmethod
+    def _multiplexed(monkeypatch):
+        from agent.secret_scope import is_multiplex_active, set_multiplex_active
+
+        was_multiplex = is_multiplex_active()
+        set_multiplex_active(True)
+        monkeypatch.setattr("agent.secret_scope.is_multiplex_active", lambda: True)
+        return was_multiplex, set_multiplex_active
+
+    def test_global_reader_still_fails_closed(self, monkeypatch):
+        """The fail-closed policy stays global; only the TTS setting reads tolerate it."""
+        from agent.secret_scope import UnscopedSecretError
+        from hermes_cli.config import get_env_value
+
+        was_multiplex, set_multiplex_active = self._multiplexed(monkeypatch)
+        try:
+            with pytest.raises(UnscopedSecretError):
+                get_env_value("GEMINI_BASE_URL")
+        finally:
+            set_multiplex_active(was_multiplex)
+
+    def test_voice_reply_reaches_the_default_endpoint(self, tmp_path, monkeypatch, mock_gemini_response):
+        """An unset GEMINI_BASE_URL falls back to the documented endpoint instead of raising."""
+        from tools.tts_tool import _generate_gemini_tts
+        from tools.tts_tool_providers import DEFAULT_GEMINI_TTS_BASE_URL
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        was_multiplex, set_multiplex_active = self._multiplexed(monkeypatch)
+        try:
+            with patch("requests.post", return_value=mock_gemini_response) as mock_post:
+                _generate_gemini_tts("Hi", str(tmp_path / "test.wav"), {})
+        finally:
+            set_multiplex_active(was_multiplex)
+
+        assert mock_post.call_args[0][0].startswith(DEFAULT_GEMINI_TTS_BASE_URL)
+
+    def test_unscoped_read_uses_this_profiles_own_env(self, monkeypatch):
+        """Unscoped is not "unset": the profile's own env still supplies the setting."""
+        from tools.tts_tool_providers import _optional_setting_env
+
+        monkeypatch.setenv("GEMINI_BASE_URL", "https://gemini.example/v1beta")
+        was_multiplex, set_multiplex_active = self._multiplexed(monkeypatch)
+        try:
+            assert _optional_setting_env("GEMINI_BASE_URL") == "https://gemini.example/v1beta"
+        finally:
+            set_multiplex_active(was_multiplex)
+
+    def test_streaming_lane_resolves_the_same_endpoint(self, monkeypatch):
+        """Both lanes share one resolution point, so the streaming provider cannot drift."""
+        from tools.tts_tool_providers import DEFAULT_GEMINI_TTS_BASE_URL, _gemini_base_url
+
+        was_multiplex, set_multiplex_active = self._multiplexed(monkeypatch)
+        try:
+            assert _gemini_base_url({}) == DEFAULT_GEMINI_TTS_BASE_URL
+            assert _gemini_base_url({"base_url": "https://tts.example/v1beta"}) == "https://tts.example/v1beta"
+        finally:
+            set_multiplex_active(was_multiplex)
+
+
 class TestGeminiInCheckRequirements:
     def test_gemini_api_key_satisfies_requirements(self, monkeypatch):
         from tools.tts_tool import check_tts_requirements
