@@ -73,8 +73,19 @@ const HUGGING_DISPLAY_MATH_CLOSE_RE = /^([ \t]*(?:>[ \t]*)*[ \t]*)(\S[^\n]*?)\$\
 // `*` is never meaningful in a real URL path, and GFM's own autolink extension
 // likewise strips trailing emphasis/punctuation — so dropping it here is safe
 // and keeps the emphasis run intact. Other trailing punctuation is still peeled
-// off by the final `[^\s<>"'`*.,;:!?]` class.
-const RAW_URL_RE = /https?:\/\/[^\s<>"'`*]+[^\s<>"'`*.,;:!?]/g
+// off by the final `[….,;:!?]` class.
+//
+// They also exclude CJK / full-width PUNCTUATION, because Chinese and Japanese
+// prose abut a link with no space: `…/v2.1.0（private，done）` and `…/docs。` both
+// mean the URL ends at the mark, and an ASCII-only class ran on to the next
+// ASCII whitespace and swallowed the sentence into the href (#144736). Only the
+// punctuation blocks are excluded — ideographs and half-width katakana stay URL
+// characters, since `…/路径/含中文` and `…?q=中文` are valid IRIs that already
+// worked (#144736 asks for the punctuation half only).
+const URL_CJK_STOP = String.raw`\u3000-\u303f\ufe30-\ufe4f\ufe50-\ufe6f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65`
+const RAW_URL_BODY = String.raw`[^\s<>"'\`*${URL_CJK_STOP}]+`
+const RAW_URL_TAIL = String.raw`[^\s<>"'\`*.,;:!?${URL_CJK_STOP}]`
+const RAW_URL_RE = new RegExp(`https?:\\/\\/${RAW_URL_BODY}${RAW_URL_TAIL}`, 'g')
 const URL_TRAILING_PUNCTUATION = '.,;:!?'
 // Markdown that already owns the URLs inside it, which the bare-URL autolinker
 // steps over whole (#49822): inline links and images `[label](dest "title")`,
@@ -108,7 +119,9 @@ const LOCAL_PREVIEW_ONLY_RE = /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|
 const URL_ONLY_LINE_RE = /^\s*https?:\/\/\S+\s*$/i
 // Autolink-shaped spans (bare or angle-bracketed http(s) URLs) that must be
 // skipped by lone-tilde escaping: `~` is legal in URL paths and must survive.
-const URL_LIKE_SPLIT_RE = /(<https?:\/\/[^>\s]+>|https?:\/\/[^\s<>"'`*]+[^\s<>"'`*.,;:!?])/g
+// Built from the same body/tail classes as RAW_URL_RE so the two boundaries
+// cannot drift apart again (#144736).
+const URL_LIKE_SPLIT_RE = new RegExp(`(<https?:\\/\\/[^>\\s]+>|https?:\\/\\/${RAW_URL_BODY}${RAW_URL_TAIL})`, 'g')
 // A `~` that is neither part of `~~~` fence, part of `~~` strikethrough, nor
 // an already-escaped `\~`. Escaping it with `\~` makes `marked` render a
 // literal tilde, so CJK ranges (`1~10`) and approximation prefixes (`~¥0.089`)

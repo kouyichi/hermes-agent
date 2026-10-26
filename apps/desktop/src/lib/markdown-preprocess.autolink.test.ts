@@ -156,3 +156,54 @@ describe('preprocessMarkdown / bare-URL trailing punctuation', () => {
     expect(hrefs(input)).toEqual([expected])
   })
 })
+
+describe('preprocessMarkdown / bare-URL boundary at CJK punctuation', () => {
+  // Chinese and Japanese prose abut a link with no space, so the sentence
+  // delimiter is a full-width mark: `…/v2.1.0（private，done）`, `…/docs。`.
+  // The ASCII-only boundary class ran on to the next ASCII whitespace and
+  // swallowed that tail into the href — the link 404s (the tail is
+  // percent-encoded into it) and the rest of the sentence renders as link
+  // text (#144736).
+  it.each([
+    ['看 https://example.com/release/v2.1.0（private，建库成功）', 'https://example.com/release/v2.1.0'],
+    ['地址 https://example.com/docs。', 'https://example.com/docs'],
+    ['引用 https://example.com/a」', 'https://example.com/a'],
+    ['枚举 https://example.com/a、后面', 'https://example.com/a']
+  ])('%s links %s', (input, expected) => {
+    expect(hrefs(input)).toEqual([expected])
+  })
+
+  it('keeps the punctuation and the following prose outside the anchor', () => {
+    expect(preprocessMarkdown('地址 https://example.com/docs。')).toBe('地址 <https://example.com/docs>。')
+    expect(preprocessMarkdown('看 https://example.com/v2.1.0（private）')).toBe(
+      '看 <https://example.com/v2.1.0>（private）'
+    )
+  })
+
+  it('splits two URLs separated only by a full-width mark', () => {
+    expect(hrefs('结果 https://example.com/a。然后 https://example.com/b 也看下')).toEqual([
+      'https://example.com/a',
+      'https://example.com/b'
+    ])
+  })
+
+  // The stop set is punctuation only. Ideographs and half-width katakana are
+  // legal IRI path/query content and already worked; narrowing the class must
+  // not truncate them.
+  it.each([
+    ['ideographs in the path', '看 https://example.com/路径/含中文'],
+    ['ideographs in the query', '看 https://example.com/a?q=中文'],
+    ['half-width katakana', '見 https://example.com/ｶﾀｶﾅ']
+  ])('keeps %s inside the URL', (_label, input) => {
+    expect(hrefs(input)).toEqual([input.slice(input.indexOf('https://'))])
+  })
+
+  // A markdown link owns its own destination, so a full-width mark inside it is
+  // the author's choice, not a sentence boundary.
+  it('leaves a markdown link destination that contains full-width punctuation whole', () => {
+    const input = '[发布记录](https://example.com/路径（v2.1.0）)'
+
+    expect(preprocessMarkdown(input)).toBe(input)
+    expect(hrefs(input)).toEqual(['https://example.com/路径（v2.1.0）'])
+  })
+})
