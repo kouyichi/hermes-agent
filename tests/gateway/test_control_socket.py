@@ -330,6 +330,34 @@ def test_bind_refused_for_other_reasons_still_fails(short_home: Path, monkeypatc
     assert not (home / "gateway.sock.path").exists()
 
 
+def test_bind_permission_refused_listens_on_private_fallback(short_home: Path, monkeypatch):
+    """An sshfs/fuse bind mount answers EPERM, not EOPNOTSUPP (#144696).
+
+    colima mounts the home over sshfs, where ``bind()`` of an AF_UNIX node fails with
+    ``[Errno 1] Operation not permitted``. That refusal is the same class as the Docker
+    Desktop one — the filesystem cannot host a socket — so it takes the same private
+    temp-dir fallback instead of aborting the gateway boot.
+    """
+    home = short_home.resolve()  # match the server's resolved home (macOS /tmp -> /private/tmp)
+    attempts = _refusing_start_unix_server(monkeypatch, refuse_under=home, err=errno.EPERM)
+
+    async def scenario():
+        server = GatewayControlServer(home, verb_handlers={"identify": lambda: {"pid": 13}})
+        assert await server.start()
+        try:
+            target = Path((home / "gateway.sock.path").read_text(encoding="utf-8"))
+            assert server._bind_path == target and target.name == "control.sock"
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: identify_gateway(home))
+        finally:
+            await server.stop()
+
+    assert _run(scenario()) == {"pid": 13}
+    assert attempts[0] == str(home / "gateway.sock")
+    assert attempts[-1].endswith("/control.sock")
+    assert not (home / "gateway.sock.path").exists()
+
+
 def test_long_home_end_to_end_via_pointer(tmp_path: Path):
     deep = tmp_path / ("p" * 120) / ".hermes"
     deep.mkdir(parents=True)

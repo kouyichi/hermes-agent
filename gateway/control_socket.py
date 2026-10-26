@@ -37,9 +37,10 @@ _MAX_REQUEST_BYTES = 64 * 1024
 _MAX_RESPONSE_BYTES = 512 * 1024
 _DEFAULT_CLIENT_TIMEOUT = 2.0
 # What a filesystem that cannot host an AF_UNIX node answers: a Docker Desktop (virtiofs) bind mount
-# refuses the socket, and an inode a previous container left there can be neither stat'ed nor
-# removed from inside (#123761). Not EADDRINUSE: a live sibling must keep failing loudly.
-_SOCKET_UNSUPPORTED_ERRNOS = frozenset({errno.EOPNOTSUPP, errno.ENOTSUP})
+# refuses the socket (an sshfs/fuse one over colima answers EPERM, #144696), and an inode a previous
+# container left there can be neither stat'ed nor removed from inside (#123761). Not EADDRINUSE: a
+# live sibling must keep failing loudly, and a bare PermissionError (foreign owner) carries no errno.
+_SOCKET_UNSUPPORTED_ERRNOS = frozenset({errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP})
 
 
 def _home_hash(home: Path) -> str:
@@ -237,8 +238,8 @@ class GatewayControlServer:
         try:
             bind_path = await self._bind_posix(bind_path, pointer_file)
         except OSError as exc:
-            # A home that fits sun_path can still refuse the socket (Docker Desktop bind mounts,
-            # #123761): listen on the same private temp-dir socket + pointer an over-long home uses.
+            # A home that fits sun_path can still refuse the socket (Docker Desktop's virtiofs, a
+            # colima sshfs mount, #123761/#144696): listen where an over-long home already does.
             if pointer_file is not None or exc.errno not in _SOCKET_UNSUPPORTED_ERRNOS:
                 raise
             logger.warning("Control socket cannot be created in %s (%s); listening in a private temp directory",
