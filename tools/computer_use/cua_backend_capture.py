@@ -113,6 +113,50 @@ def _png_metrics(png_b64: str, width: int, height: int) -> tuple[int, int, int]:
     detected_width, detected_height = _image_dimensions_from_bytes(raw)
     return len(raw), *((detected_width, detected_height) if detected_width and detected_height else (width, height))
 
+
+def _full_screen_capture_cap() -> Optional[int]:
+    """``computer_use.max_image_dimension`` for the full-screen lane. Deferred import: ``cua_backend``
+    imports this mixin, so its config helper cannot be resolved at module scope."""
+    try:
+        from tools.computer_use.cua_backend import _computer_use_max_image_dimension
+    except ImportError:  # pragma: no cover - defensive: the mixin is only ever used by that backend
+        return None
+    return _computer_use_max_image_dimension()
+
+
+def _cap_full_screen_png(png_b64: str, max_dim: Optional[int]) -> tuple[str, str]:
+    """Downscale a composited full-screen grab so its longest side fits ``max_dim`` -> ``(png_b64, note)``.
+
+    ``get_desktop_state`` ignores the driver's ``max_image_dimension`` config (window captures honour it
+    driver-side), so a 5K display ships the desktop at native resolution — 22.7 MB of base64, past the
+    provider's 5 MB image limit (#145033). The note names the factor because clicks take raw x/y: a
+    shrunk image without it makes every reported coordinate land ~3x off. Empty note + identical bytes
+    mean "left alone" (fits, cap disabled, or the frame could not be re-encoded).
+    """
+    if not png_b64 or not max_dim:
+        return png_b64, ""
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(base64.b64decode(png_b64, validate=False))) as img:
+            original = img.size
+            if max(original) <= max_dim:
+                return png_b64, ""
+            img.thumbnail((max_dim, max_dim))
+            resized = img.size
+            out = BytesIO()
+            img.save(out, format="PNG")
+    except Exception:  # a frame Pillow cannot open must not cost the model its screenshot
+        logger.debug("computer_use: full-screen downscale skipped", exc_info=True)
+        return png_b64, ""
+    factor = original[0] / resized[0] if resized[0] else 1.0
+    return base64.b64encode(out.getvalue()).decode("ascii"), (
+        f"screenshot downscaled from {original[0]}x{original[1]} to {resized[0]}x{resized[1]} to stay "
+        f"within the image size cap; multiply any coordinates you report by {factor:.2f} to map back "
+        "to the real screen")
+
 def _is_desktop_window(w: dict[str, Any], names: tuple[str, ...] = _DESKTOP_WINDOW_NAMES) -> bool:
     return any(name in f"{w.get('app_name', '')} {w.get('title', '')}".lower() for name in names)
 
@@ -360,12 +404,14 @@ class _CaptureMixin:
         png_b64, image_mime_type = _image_from_tool_result(out)
         if not png_b64:
             return self._failed_capture(mode, _NO_DESKTOP_IMAGE_MSG)
+        png_b64, scale_note = _cap_full_screen_png(png_b64, _full_screen_capture_cap())
         sc = out.get("structuredContent") or {}
         png_bytes_len, width, height = _png_metrics(png_b64, int(sc.get("screenshot_width") or sc.get("screen_width") or 0),
                                                     int(sc.get("screenshot_height") or sc.get("screen_height") or 0))
         return CaptureResult(mode="vision", width=width, height=height, png_b64=png_b64, app="screen",
                              window_title="Full screen (composited)", png_bytes_len=png_bytes_len,
-                             image_mime_type=image_mime_type, note=_FULL_SCREEN_NOTE)
+                             image_mime_type=image_mime_type,
+                             note=f"{_FULL_SCREEN_NOTE} ({scale_note})" if scale_note else _FULL_SCREEN_NOTE)
 
     def list_apps(self) -> list[dict[str, Any]]:
         out = self._session.call_tool("list_apps", {"session": self._session_id})

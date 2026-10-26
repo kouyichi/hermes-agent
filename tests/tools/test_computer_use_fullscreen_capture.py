@@ -228,3 +228,78 @@ class TestNoteInSummary:
 
         text = str(result)
         assert "full-screen capture has no interactable elements" in text
+
+
+def _big_png_b64(width: int, height: int) -> str:
+    """A decodable PNG at ``width``×``height``. A flat fill keeps encoding fast; only
+    the pixel dimensions matter to the size cap."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    out = BytesIO()
+    Image.new("RGB", (width, height), (32, 64, 128)).save(out, format="PNG")
+    return base64.b64encode(out.getvalue()).decode("ascii")
+
+
+def _png_size(png_b64: str) -> tuple[int, int]:
+    from io import BytesIO
+
+    from PIL import Image
+
+    with Image.open(BytesIO(base64.b64decode(png_b64))) as image:
+        return image.size
+
+
+class TestFullScreenDownscale:
+    """#145033: `get_desktop_state` ignores the driver's `max_image_dimension`, so a 5K
+    full-screen grab shipped at native resolution — 22.7 MB of base64, past the
+    provider's 5 MB image limit. The cap has to be applied on our side."""
+
+    def _capture(self, image: Optional[str], cap: Optional[int], monkeypatch):
+        from tools.computer_use import cua_backend
+
+        monkeypatch.setattr(cua_backend, "_computer_use_max_image_dimension",
+                            lambda: cap)
+        backend = _make_backend(_FakeSession(desktop_image=image))
+        return backend.capture(mode="vision", app="screen")
+
+    def test_downscales_to_the_configured_cap(self, monkeypatch):
+        cap = self._capture(_big_png_b64(1200, 800), 256, monkeypatch)
+
+        assert cap.png_b64 is not None
+        assert _png_size(cap.png_b64) == (256, 171)
+        assert (cap.width, cap.height) == (256, 171), (
+            "reported dimensions must describe the pixels actually sent"
+        )
+        assert cap.png_bytes_len == len(base64.b64decode(cap.png_b64))
+
+    def test_note_names_the_factor_back_to_native_coordinates(self, monkeypatch):
+        cap = self._capture(_big_png_b64(1200, 800), 256, monkeypatch)
+
+        assert "downscaled from 1200x800 to 256x171" in cap.note
+        # Clicks take raw x/y, so a shrunk image needs the factor to stay actionable.
+        assert "multiply any coordinates you report by 4.69" in cap.note
+        assert "full-screen capture has no interactable elements" in cap.note
+
+    def test_image_within_the_cap_keeps_its_exact_bytes(self, monkeypatch):
+        cap = self._capture(_PNG_B64, 1456, monkeypatch)
+
+        assert cap.png_b64 == _PNG_B64
+        assert (cap.width, cap.height) == (8, 8)
+        assert "downscaled" not in cap.note
+
+    def test_disabled_cap_returns_native_resolution(self, monkeypatch):
+        image = _big_png_b64(1200, 800)
+        cap = self._capture(image, None, monkeypatch)
+
+        assert cap.png_b64 == image
+        assert _png_size(image) == (1200, 800)
+        assert "downscaled" not in cap.note
+
+    def test_undecodable_frame_is_shipped_as_is(self, monkeypatch):
+        cap = self._capture("not-a-png-at-all", 256, monkeypatch)
+
+        assert cap.png_b64 == "not-a-png-at-all", (
+            "a frame Pillow cannot decode must not cost the model its screenshot"
+        )
