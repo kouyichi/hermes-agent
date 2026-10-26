@@ -382,10 +382,26 @@ async def _start_gateway_start_control_socket(runner):
     return _control_server
 
 
+def _start_gateway_browser_orphan_driver() -> None:
+    """Give the orphan browser reap a driver in a gateway that never serves a browser request.
+
+    ``reap_orphaned_browser_sessions`` has exactly one periodic caller — the browser janitor
+    thread — and ``start_cleanup_thread`` was reached only from a browser SESSION's creation
+    (``tools/browser_session.py``). A gateway force-killed while holding a Chromium tree
+    therefore left that tree and its launch lease alive through every later gateway generation:
+    nothing in the new process ever called the reaper (#145010). Starting the janitor at startup
+    reaps on its first cycle and every ``BROWSER_ORPHAN_REAP_INTERVAL``; its other chore, closing
+    idle sessions, only visits sessions THIS process opened, so a browser-less gateway just polls
+    the reaper. Idempotent.
+    """
+    from tools.browser_session_lifecycle import start_cleanup_thread
+    start_cleanup_thread()
+
+
 def _start_gateway_start_cron_and_housekeeping(runner):
     """Start the cron scheduler thread + gateway housekeeping thread; returns
     ``(cron_stop, cron_provider, cron_thread, housekeeping_thread)``."""
-    from gateway.run import (Dict, Platform, _cron_profile_gate, _cron_tick_profile_homes, _start_gateway_housekeeping, asyncio, logger, threading)
+    from gateway.run import (Dict, Platform, _best_effort, _cron_profile_gate, _cron_tick_profile_homes, _start_gateway_housekeeping, asyncio, logger, threading)
     # The event loop is passed so cron delivery can use live adapters (E2EE support).
     from cron.scheduler_provider import (
         InProcessCronScheduler, resolve_cron_scheduler, scheduler_for_profile_mode)
@@ -454,6 +470,9 @@ def _start_gateway_start_cron_and_housekeeping(runner):
                 getattr(cron_provider, "name", "external"))
 
     # Gateway-only housekeeping runs independently of the cron provider; shares cron_stop for shutdown.
+    # Browser orphans outlive the gateway that leaked them: the janitor is the reap's only driver and
+    # it used to start lazily on first browser use, so every later generation inherited the tree (#145010).
+    _best_effort(_start_gateway_browser_orphan_driver, "Browser orphan reaper did not start: %s")
     housekeeping_thread = threading.Thread(
         target=_start_gateway_housekeeping, args=(cron_stop,),
         kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop(),
