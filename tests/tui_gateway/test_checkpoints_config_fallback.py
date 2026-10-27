@@ -70,6 +70,46 @@ class TestResolveCheckpointsEnabled:
         ) is False
 
 
+def _make_agent_with_checkpoints(monkeypatch, cfg, env_val="__unset__"):
+    """Build the desktop/TUI agent over ``cfg`` and return the kwargs ``AIAgent`` received."""
+    import types
+
+    captured = {}
+
+    def fake_agent(**kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(model=kwargs.get("model"))
+
+    if env_val == "__unset__":
+        monkeypatch.delenv("HERMES_TUI_CHECKPOINTS", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_TUI_CHECKPOINTS", env_val)
+    monkeypatch.delenv("HERMES_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
+    monkeypatch.delenv("HERMES_DESKTOP", raising=False)
+    monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
+    monkeypatch.setattr(
+        server, "_load_cfg",
+        lambda: {**cfg, "model": {"default": "gpt-5.5", "provider": "openai-codex"}},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested=None, target_model=None: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "token",
+            "api_mode": "codex_responses",
+            "credential_pool": None,
+        },
+    )
+    monkeypatch.setattr("run_agent.AIAgent", fake_agent)
+    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda platform=None: ["file"])
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    server._make_agent("sid", "session-key")
+    return captured
+
+
 class TestMakeAgentCheckpointsFallback:
     """The env-var → config fallback inside ``_make_agent`` (the wiring).
 
@@ -80,42 +120,7 @@ class TestMakeAgentCheckpointsFallback:
     """
 
     def _make_agent_with_checkpoints(self, monkeypatch, cfg, env_val="__unset__"):
-        import types
-
-        captured = {}
-
-        def fake_agent(**kwargs):
-            captured.update(kwargs)
-            return types.SimpleNamespace(model=kwargs.get("model"))
-
-        if env_val == "__unset__":
-            monkeypatch.delenv("HERMES_TUI_CHECKPOINTS", raising=False)
-        else:
-            monkeypatch.setenv("HERMES_TUI_CHECKPOINTS", env_val)
-        monkeypatch.delenv("HERMES_MODEL", raising=False)
-        monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
-        monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
-        monkeypatch.delenv("HERMES_DESKTOP", raising=False)
-        monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
-        monkeypatch.setattr(
-            server, "_load_cfg",
-            lambda: {**cfg, "model": {"default": "gpt-5.5", "provider": "openai-codex"}},
-        )
-        monkeypatch.setattr(
-            "hermes_cli.runtime_provider.resolve_runtime_provider",
-            lambda requested=None, target_model=None: {
-                "provider": "openai-codex",
-                "base_url": "https://chatgpt.com/backend-api/codex",
-                "api_key": "token",
-                "api_mode": "codex_responses",
-                "credential_pool": None,
-            },
-        )
-        monkeypatch.setattr("run_agent.AIAgent", fake_agent)
-        monkeypatch.setattr(server, "_load_enabled_toolsets", lambda platform=None: ["file"])
-        monkeypatch.setattr(server, "_get_db", lambda: None)
-        server._make_agent("sid", "session-key")
-        return captured
+        return _make_agent_with_checkpoints(monkeypatch, cfg, env_val)
 
     def test_desktop_config_enabled_reaches_agent(self, monkeypatch):
         """Issue #79625: config ``enabled: true`` (env unset) → agent has
@@ -143,3 +148,51 @@ class TestMakeAgentCheckpointsFallback:
             monkeypatch, {"checkpoints": {"enabled": True}}, env_val="0"
         )
         assert captured.get("checkpoints_enabled") is False
+
+
+class TestMakeAgentCheckpointLimits:
+    """Issue #145268: ``_make_agent`` passed ``checkpoints_enabled`` alone, so the three store
+    limits never reached a desktop/TUI agent and its store ran the over-cap round on every
+    checkpoint no matter what ``checkpoints:`` said. Same test shape for the same reason: the
+    wiring is what broke, so the assertions belong at the ``AIAgent`` boundary.
+    """
+
+    LIMIT_KEYS = ("checkpoint_max_snapshots", "checkpoint_max_total_size_mb", "checkpoint_max_file_size_mb")
+
+    def test_config_limits_reach_agent(self, monkeypatch):
+        captured = _make_agent_with_checkpoints(
+            monkeypatch,
+            {"checkpoints": {"enabled": True, "max_snapshots": 7,
+                             "max_total_size_mb": 1234, "max_file_size_mb": 3}},
+        )
+        assert captured["checkpoint_max_snapshots"] == 7
+        assert captured["checkpoint_max_total_size_mb"] == 1234
+        assert captured["checkpoint_max_file_size_mb"] == 3
+
+    def test_defaults_apply_when_the_section_sets_no_limits(self, monkeypatch):
+        from hermes_cli.config import DEFAULT_CONFIG
+
+        captured = _make_agent_with_checkpoints(monkeypatch, {"checkpoints": {"enabled": True}})
+        defaults = DEFAULT_CONFIG["checkpoints"]
+        assert captured["checkpoint_max_snapshots"] == defaults["max_snapshots"]
+        assert captured["checkpoint_max_total_size_mb"] == defaults["max_total_size_mb"]
+        assert captured["checkpoint_max_file_size_mb"] == defaults["max_file_size_mb"]
+
+    def test_legacy_bool_section_keeps_the_default_limits(self, monkeypatch):
+        from hermes_cli.config import DEFAULT_CONFIG
+
+        captured = _make_agent_with_checkpoints(monkeypatch, {"checkpoints": True})
+        assert captured["checkpoints_enabled"] is True
+        assert captured["checkpoint_max_total_size_mb"] == DEFAULT_CONFIG["checkpoints"]["max_total_size_mb"]
+
+    def test_limits_match_the_messaging_gateway_resolution(self, monkeypatch):
+        """The desktop/TUI surface and the messaging gateway must build the same store limits
+        from the same config, or the two surfaces disagree about when a store is over cap."""
+        from gateway.session_worker_construct import checkpoint_agent_kwargs
+
+        cfg = {"checkpoints": {"enabled": True, "max_snapshots": 5,
+                               "max_total_size_mb": 900, "max_file_size_mb": 2}}
+        expected = checkpoint_agent_kwargs(cfg)
+        captured = _make_agent_with_checkpoints(monkeypatch, cfg)
+        for key in self.LIMIT_KEYS:
+            assert captured[key] == expected[key]

@@ -646,6 +646,8 @@ def _make_agent(
     cfg = _load_cfg()
     # Load hooks alongside the same profile config used to construct this agent.
     from agent.shell_hooks import register_from_config
+    # Store limits the agent applies itself; the enabled flag keeps its env-var precedence (#145268).
+    from tui_gateway.checkpoints import resolve_checkpoint_limits
     register_from_config(cfg)
     system_prompt = _startup_system_prompt(cfg, session_id or key)
     model, runtime = _resolve_agent_model_runtime(model_override, provider_override)
@@ -677,7 +679,7 @@ def _make_agent(
         # Builds that run before the record exists (branch, eager resume, compute host) pass it explicitly.
         user_id=auth_user_id if auth_user_id is not None else _session_auth_user_id(session),
         session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
-        checkpoints_enabled=_resolve_checkpoints_enabled(cfg),
+        checkpoints_enabled=_resolve_checkpoints_enabled(cfg), **resolve_checkpoint_limits(cfg),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
         # The resolved provider's request body (a custom entry's extra_body), as the CLI/cron/gateway pass it.

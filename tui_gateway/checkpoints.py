@@ -14,19 +14,42 @@ import os
 from utils import is_truthy_value
 
 
+def _checkpoint_section(cfg: dict | None) -> dict:
+    """The ``checkpoints`` config section, normalised: the legacy ``checkpoints: true`` bool form
+    becomes ``{"enabled": ...}``; an absent or malformed section becomes ``{}`` so each lookup
+    falls back to ``DEFAULT_CONFIG``."""
+    cp_cfg = (cfg or {}).get("checkpoints", {})
+    if isinstance(cp_cfg, bool):
+        return {"enabled": cp_cfg}
+    return cp_cfg if isinstance(cp_cfg, dict) else {}
+
+
 def _load_checkpoints_enabled(cfg: dict | None = None) -> bool:
     """Whether filesystem checkpoints are enabled for TUI-created agents.
 
     Keeps the legacy ``checkpoints: true`` bool form working and falls back to the
     ``DEFAULT_CONFIG`` default when the section is absent or malformed.
     """
-    cp_cfg = (cfg or {}).get("checkpoints", {})
-    if isinstance(cp_cfg, bool):
-        cp_cfg = {"enabled": cp_cfg}
-    elif not isinstance(cp_cfg, dict):
-        cp_cfg = {}
     from hermes_cli.config import DEFAULT_CONFIG
-    return bool(cp_cfg.get("enabled", DEFAULT_CONFIG["checkpoints"]["enabled"]))
+    return bool(_checkpoint_section(cfg).get("enabled", DEFAULT_CONFIG["checkpoints"]["enabled"]))
+
+
+def resolve_checkpoint_limits(cfg: dict | None = None) -> dict:
+    """The three store limits ``AIAgent`` takes (``checkpoint_max_*``), resolved from the profile's
+    ``checkpoints:`` section with ``DEFAULT_CONFIG`` defaults.
+
+    Desktop/TUI agents were built with ``checkpoints_enabled`` alone, so a store over
+    ``checkpoints.max_total_size_mb`` ran the over-cap round on every checkpoint and the config
+    keys were unreadable there (#145268). Same precedence as the CLI
+    (``hermes_cli/cli_init_mixin.py``) and the messaging gateway
+    (``gateway/session_worker_construct.py::checkpoint_agent_kwargs``) — the parity test in
+    ``tests/tui_gateway/test_checkpoints_config_fallback.py`` keeps the three in step.
+    """
+    from hermes_cli.config import DEFAULT_CONFIG
+    section, defaults = _checkpoint_section(cfg), DEFAULT_CONFIG["checkpoints"]
+    return {"checkpoint_max_snapshots": section.get("max_snapshots", defaults["max_snapshots"]),
+            "checkpoint_max_total_size_mb": section.get("max_total_size_mb", defaults["max_total_size_mb"]),
+            "checkpoint_max_file_size_mb": section.get("max_file_size_mb", defaults["max_file_size_mb"])}
 
 
 def resolve_checkpoints_enabled(cfg: dict | None = None) -> bool:
