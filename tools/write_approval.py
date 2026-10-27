@@ -71,11 +71,26 @@ def _pending_files(subsystem: str) -> list:
     return list(d.glob("*.json")) if d.exists() else []
 
 
+class StagingFailed(RuntimeError):
+    """A pending write could not be persisted, so no record exists to approve. Callers must turn
+    this into a tool error: a returned record reads as "staged" downstream, and the agent then
+    tells the user a change is queued for review when nothing was saved (#145447)."""
+
+
+def stage_failure_message(subsystem: str) -> str:
+    """The tool-facing text for a failed staging step, shared so memory and skills agree."""
+    return (f"Could not stage this {subsystem} write for approval: nothing was saved and nothing "
+            f"was changed, so no pending record exists to review. Check that "
+            f"{_pending_path(subsystem, '').parent} is writable, then retry.")
+
+
 def stage_write(subsystem: str, payload: dict[str, Any], *, summary: str, origin: str) -> dict[str, Any]:
     """Persist a pending write and return its record (``id`` + metadata). ``payload`` is the exact
     kwargs to replay the write on approval; ``origin`` is ``foreground`` or ``background_review``.
-    Best-effort: on disk failure it logs and still returns a record — the write is lost, which is
-    the safe failure for an approval gate (nothing silently committed)."""
+
+    Raises ``StagingFailed`` when the record cannot be written. The write is lost either way, but
+    a caller cannot tell that from a returned record: it would report the change as staged and the
+    agent would tell the user a review is waiting that does not exist on disk (#145447)."""
     pid = uuid.uuid4().hex[:8]
     record = {
         "id": pid, "subsystem": subsystem, "action": payload.get("action", ""),
@@ -84,8 +99,9 @@ def stage_write(subsystem: str, payload: dict[str, Any], *, summary: str, origin
     }
     try:
         atomic_json_write(_pending_path(subsystem, pid), record)
-    except Exception as e:  # pragma: no cover - disk failure path
+    except Exception as e:
         logger.error("Failed to stage pending %s write: %s", subsystem, e, exc_info=True)
+        raise StagingFailed(f"could not stage pending {subsystem} write: {e}") from e
     return record
 
 
