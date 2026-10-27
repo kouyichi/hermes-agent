@@ -103,6 +103,70 @@ def unclaimed_pending_slot(job, now):
     return slot
 
 
+# --- Bounded restore: the crash window is not a retry budget ---
+#
+# The tick that restores a pending slot re-stamps it in the SAME pass, before dispatch — that
+# second stamp is the crash window's protection, not a retry. So a dispatch that is refused or
+# failing rather than dead (executor error, unwritable executions store, a pool held by a wedged
+# run) leaves the stamp behind with nothing to claim it, and the next tick restores the same
+# instant again: one warning per tick, the job pinned to that instant for as long as the failure
+# lasts (161 restores across 160 minutes in #145564). The restore is therefore counted per stored
+# instant; past the budget the schedule moves past the occurrence instead of replaying it.
+MAX_SLOT_RESTORES = 3
+
+
+def restore_unclaimed_slot(job, scan, slot):
+    """Put *slot* back as the due instant, at most ``MAX_SLOT_RESTORES`` times per instant.
+
+    Returns the instant the caller must run, or None when the occurrence has spent its attempts:
+    then ``next_run_at`` is advanced past it and both stamps are dropped, so a dispatch that can
+    never claim the slot stops re-looping the schedule. The count is keyed by the stored instant, so
+    a fresh occurrence starts with the full budget, and a single crash-restart pair still restores
+    (#107485).
+    """
+    seen = job.get("restored_slot")
+    attempts = (int(seen.get("count") or 0)
+                if isinstance(seen, dict) and seen.get("scheduled_at") == slot else 0)
+    if attempts >= MAX_SLOT_RESTORES:
+        return _give_up_restored_slot(job, scan, slot, attempts)
+    logger.warning(
+        "Job '%s' (%s): occurrence %s was taken off the schedule but never claimed "
+        "(scheduler stopped before dispatch); restoring it as the due instant (was %s, attempt %d/%d).",
+        job.get("name", job.get("id")), job.get("id"), slot, job.get("next_run_at"),
+        attempts + 1, MAX_SLOT_RESTORES)
+    job["next_run_at"] = slot
+    job["restored_slot"] = {"scheduled_at": slot, "count": attempts + 1}
+    _drop_pending_stamp(job, scan)
+    scan.persist(job["id"], next_run_at=slot, restored_slot=job["restored_slot"])
+    return slot
+
+
+def _give_up_restored_slot(job, scan, slot, attempts):
+    """Advance past an occurrence that has been restored ``attempts`` times and never claimed."""
+    from cron.jobs import compute_next_run
+
+    nxt = compute_next_run(job.get("schedule") or {}, scan.now.isoformat()) or job.get("next_run_at")
+    logger.warning(
+        "Job '%s' (%s): occurrence %s was restored %d times but still was not claimed "
+        "(dispatch refused or failing); giving it up and moving to %s instead of re-pinning it.",
+        job.get("name", job.get("id")), job.get("id"), slot, attempts, nxt)
+    job.pop("restored_slot", None)
+    job["next_run_at"] = nxt
+    raw = scan.find(job.get("id"))
+    if raw is not None:
+        raw.pop("restored_slot", None)
+    _drop_pending_stamp(job, scan)
+    scan.persist(job["id"], next_run_at=nxt)
+
+
+def _drop_pending_stamp(job, scan):
+    """Clear the window stamp on the scan's copy and on the raw record it saves."""
+    job.pop("pending_slot", None)
+    raw = scan.find(job.get("id"))
+    if raw is not None:
+        raw.pop("pending_slot", None)
+
+
 def get_catch_up_occurrence_count() -> int:
     """Return the profile-local stale-schedule catch-up count."""
     from cron.jobs import _current_cron_store

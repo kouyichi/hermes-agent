@@ -2774,6 +2774,7 @@ def claim_job_for_fire(
         job["fire_claim"] = {"at": now.isoformat(), "by": f"{_machine_id()}:{uuid.uuid4().hex}"}
         # Claimed: the occurrence is now owned by a run (its ledger row + fire claim carry it).
         job.pop("pending_slot", None)
+        job.pop("restored_slot", None)  # the restore budget is per instant: a claimed slot spends it
         if job.get("schedule", {}).get("kind") in {"cron", "interval"}:
             nxt = compute_next_run(job["schedule"], now.isoformat())
             if nxt:
@@ -3194,25 +3195,13 @@ def _oneshot_dispatch_limit_reached(job: dict[str, Any], scan: _DueScan) -> bool
 
 def _restore_unclaimed_slot(job: dict[str, Any], scan: _DueScan) -> Optional[str]:
     """Put an occurrence the dispatcher advanced past but never claimed back on the schedule
-    (#107485); returns the restored ``next_run_at`` or None. Restored ONCE: the stamp is dropped
-    here, so the slot then meets the ordinary late / fast-forward / ``cron.catch_up_missed``
-    policy like any other overdue instant — never a replay of every missed slot."""
-    from cron.occurrences import unclaimed_pending_slot
+    (#107485); returns the restored ``next_run_at`` or None. The retry policy — at most
+    ``MAX_SLOT_RESTORES`` per stored instant, then fast-forwarded — lives in ``cron.occurrences``
+    beside the stamp it reads."""
+    from cron.occurrences import restore_unclaimed_slot, unclaimed_pending_slot
 
     slot = unclaimed_pending_slot(job, scan.now)
-    if slot is None:
-        return None
-    logger.warning(
-        "Job '%s' (%s): occurrence %s was taken off the schedule but never claimed "
-        "(scheduler stopped before dispatch); restoring it as the due instant (was %s).",
-        job.get("name", job.get("id")), job.get("id"), slot, job.get("next_run_at"))
-    job["next_run_at"] = slot
-    job.pop("pending_slot", None)
-    rj = scan.find(job["id"])
-    if rj is not None:
-        rj.pop("pending_slot", None)
-    scan.persist(job["id"], next_run_at=slot)
-    return slot
+    return None if slot is None else restore_unclaimed_slot(job, scan, slot)
 
 
 def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float) -> bool:
