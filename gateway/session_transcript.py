@@ -157,6 +157,21 @@ class SessionTranscriptMixin:
         """Return the lock that serializes pending-queue drain boundaries."""
         return self._lazy("_transcript_drain_lock", threading.RLock)
 
+    def take_unseen_reactions(self, session_id: str) -> list[dict[str, Any]]:
+        """User reactions left since the last turn, stamped ``seen`` by the read (so exactly once).
+
+        The canonical turn path announces these on the next user message the same way the legacy TUI
+        turn does; a session whose DB handle is unavailable reports none rather than failing the turn.
+        """
+        db = self._db_for_session_id(session_id)
+        if db is None:
+            return []
+        try:
+            return db.take_unseen_reactions(session_id, author="user")
+        except Exception:
+            logger.debug("Pending-reaction read failed for session %s", session_id, exc_info=True)
+            return []
+
     def append_to_transcript(self, session_id: str, message: dict[str, Any], skip_db: bool = False) -> None:
         """Serialize transcript draining across queue migration boundaries. A session with no usable
         store is NOT skipped: the write is queued and counted like any other failed append, so a

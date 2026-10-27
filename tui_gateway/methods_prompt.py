@@ -203,7 +203,11 @@ def _coerce_truncate_int(rid, value, param_name="truncate_before_user_ordinal"):
 
 def _pending_reaction_notes(session: dict) -> str:
     """Note block for reactions since the last turn (model input only, announced once —
-    rows are stamped ``seen`` on read), or "".  Gated on display.message_reactions."""
+    rows are stamped ``seen`` on read), or "".  Gated on display.message_reactions.
+
+    The canonical gateway turn announces the same rows through the same renderer
+    (``gateway.session_reaction_notes``); this is the legacy in-process path only.
+    """
     session_key = str(session.get("session_key") or "")
     if not session_key:
         return ""
@@ -219,19 +223,8 @@ def _pending_reaction_notes(session: dict) -> str:
     except Exception:
         logger.debug("Failed to read pending reactions", exc_info=True)
         return ""
-    notes = []
-    for entry in pending or ():
-        snippet = (entry.get("text") or "").strip().replace("\n", " ")
-        if len(snippet) > 120:
-            snippet = snippet[:120] + "…"
-        emoji = entry.get("emoji") or ""
-        whose = "their own" if entry.get("role") == "user" else "your"
-        if snippet:
-            notes.append(f'[The user reacted {emoji} to {whose} message: "{snippet}"]')
-        else:
-            # Attachment-only / tool-call-only rows: no quote beats an empty quote.
-            notes.append(f"[The user reacted {emoji} to {whose} earlier message]")
-    return "\n".join(notes)
+    from gateway.session_reaction_notes import reaction_notes
+    return reaction_notes(pending)
 
 
 # ── prompt.submit pieces ────────────────────────────────────────────────────

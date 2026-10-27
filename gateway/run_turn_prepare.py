@@ -539,6 +539,33 @@ class GatewayTurnPrepareMixin:
         if _lease_token is not None:
             self._session_state(_quick_key).turn.lease_tokens[run_generation] = _lease_token
 
+    async def _hmwa_reaction_notes(self, event, source, session_id, turn_sidecar_notes):
+        """Reactions the user left since the last turn, on the user message (``#145472``).
+
+        The legacy TUI turn has always announced these (``tui_gateway.prompt_turn``); the canonical
+        gateway turn staged every other per-turn note and had no reaction consumer, so a reaction on
+        the shared gateway was persisted, stayed unseen and never reached the model.
+
+        LOCAL turns only: a messaging adapter delivers a reaction as its own platform event
+        (``reaction:added`` into the hook registry), so a second note there would duplicate it —
+        and ``display.message_reactions`` is an app-surface opt-in. Gated BEFORE the read, since the
+        read stamps rows seen: a disabled announcement must not consume what it never shows. Injected
+        turns are skipped too — a heartbeat or goal turn is not the user's next message.
+        """
+        if event.internal or not session_id or source.platform != Platform.LOCAL:
+            return
+        from gateway.run import _load_gateway_config
+        from gateway.session_reaction_notes import reaction_notes
+        display: Any = {}  # a config read that fails simply leaves the opt-in off
+        with suppress(Exception):
+            display = _load_gateway_config().get("display") or {}
+        if not (isinstance(display, dict) and display.get("message_reactions")):
+            return
+        # The read stamps the rows seen, so the note is announced exactly once.
+        notes = reaction_notes(await self.async_session_store.take_unseen_reactions(session_id))
+        if notes:
+            turn_sidecar_notes.append(notes)
+
     async def _hmwa_first_contact_notes(self, source, history, turn_sidecar_notes, internal=False):
         """First-ever-message onboarding note + one-time 'no home channel' prompt (both only when
         the session has no history). Delivered on the user message (sidecar), NOT the ephemeral
@@ -732,6 +759,7 @@ class GatewayTurnPrepareMixin:
 
         # Stage the notes (one-shot; consumed in run_sync) AFTER the early-out so an aborted turn
         # cannot leak them into the next turn.
+        await self._hmwa_reaction_notes(event, source, session_entry.session_id, turn_sidecar_notes)
         if turn_sidecar_notes and session_key:
             self._set_pending_turn_sidecar_notes(session_key, turn_sidecar_notes)
 
