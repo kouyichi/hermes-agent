@@ -26,6 +26,7 @@ from typing import Mapping
 from typing import Optional
 from typing import TYPE_CHECKING
 
+from hermes_cli.kanban_stale_loop import count_stale_loop
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 
 if TYPE_CHECKING:
@@ -754,17 +755,16 @@ def detect_stale_running(
     *,
     stale_timeout_seconds: int = 0,
     signal_fn=None,
+    failure_limit: Optional[int] = None,
 ) -> list[str]:
     """Reclaim ``running`` tasks with no heartbeat progress; returns their ids.
 
-    Stale = running longer than ``stale_timeout_seconds`` (active run's
-    ``started_at``, else ``tasks.started_at``) AND ``last_heartbeat_at`` NULL or
-    older than ``_STALE_HEARTBEAT_GAP_SECONDS``. Task returns to its source
-    phase, run closes ``outcome='stale'``, a live host-local worker is killed.
-    ``0`` disables the check; ``signal_fn`` is a test hook. Deliberately NOT
-    counted via ``_record_task_failure``: an absent heartbeat is not a worker
-    failure, and counting it would let long-running tasks trip the breaker.
-    """
+    Stale = running longer than ``stale_timeout_seconds`` (active run's ``started_at``, else
+    ``tasks.started_at``) AND ``last_heartbeat_at`` NULL or older than ``_STALE_HEARTBEAT_GAP_SECONDS``:
+    the card returns to its source phase, the run closes ``outcome='stale'``, a live worker is killed.
+    ``0`` disables the check; ``signal_fn`` is a test hook. Only a run that NEVER heartbeated counts
+    toward the breaker (``kanban_stale_loop``): a card that dies before its first heartbeat parks
+    instead of respawning forever; a heartbeating long-runner keeps its benign reclaim."""
     if stale_timeout_seconds <= 0:
         return []
 
@@ -839,15 +839,15 @@ def detect_stale_running(
             run_id = _kb._end_run(
                 conn, tid,
                 outcome="stale", status="stale",
-                error=(
-                    f"no heartbeat for {int(hb_age)}s "
-                    if hb_age is not None
-                    else "no heartbeat ever"
-                ) + f" after {int(elapsed)}s running",
+                error=(f"no heartbeat for {int(hb_age)}s " if hb_age is not None
+                       else "no heartbeat ever") + f" after {int(elapsed)}s running",
                 metadata=payload,
             )
             _kb._append_event(conn, tid, "stale", payload, run_id=run_id)
             reclaimed.append(tid)
+        # Outside the write_txn: ``_record_task_failure`` opens its own (see ``kanban_stale_loop``).
+        if hb_age is None:
+            count_stale_loop(conn, tid, elapsed, failure_limit=failure_limit)
 
     return reclaimed
 
@@ -2223,7 +2223,7 @@ def _run_reclaim_phase(
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)
-    result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
+    result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds, failure_limit=failure_limit)
     result.crashed = detect_crashed_workers(conn, board=board)
     # Side-channel attributes (see detect_crashed_workers); rate-limited tasks
     # went back to ``ready`` and the respawn guard defers them until quota clears.
