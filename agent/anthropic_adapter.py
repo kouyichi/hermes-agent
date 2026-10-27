@@ -670,6 +670,11 @@ def build_anthropic_kwargs(
     effective_max_tokens = _resolve_anthropic_messages_max_tokens(max_tokens, model, context_length=context_length)
     if context_length and effective_max_tokens > context_length:
         effective_max_tokens = max(context_length - 1, 1)
+    # The model's own output ceiling bounds an explicit value too (#145281): a caller forwarding the
+    # context window sends `max_tokens` above the limit and 400s, and the context clamp above can
+    # itself land there (context 131072 → 131071 on a 128000-output model). Bounding by the ceiling
+    # `max_tokens=None` already resolves to is never more restrictive than the default.
+    effective_max_tokens = min(effective_max_tokens, _get_anthropic_max_output(model))
     to_wire = _oauth_wire_namer(anthropic_tools) if is_oauth else None
     if to_wire:
         system = _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_wire)
