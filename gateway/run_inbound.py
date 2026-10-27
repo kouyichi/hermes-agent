@@ -1519,6 +1519,17 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
                 )
         return message_text
 
+    async def _pending_reaction_notes(self, source: SessionSource, session_key: str) -> str:
+        """Note block for the user's reactions since the last turn on a LOCAL turn, or "".
+
+        The TUI gateway prepends the same note in its prompt lane
+        (``tui_gateway.methods_prompt._pending_reaction_notes``); a Desktop conversation served by
+        the canonical gateway never runs that lane, so the reaction stayed unseen and unannounced
+        (#145472). Wording and the once-only rule live in ``gateway.session_reactions``.
+        """
+        from gateway.session_reactions import pending_reaction_notes
+        return await pending_reaction_notes(self, source, session_key)
+
     @classmethod
     def _prepend_inbound_document_notes(cls, event: MessageEvent, message_text: str) -> str:
         """Prepend a context note per non-media attachment (anything not routed as image/audio/video)."""
@@ -1674,6 +1685,8 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             message_text = await self._enrich_inbound_voice(event, source, message_text, audio_paths)
         message_text = self._prepend_inbound_media_file_notes(message_text, audio_file_paths, video_paths)
         message_text = self._prepend_inbound_document_notes(event, message_text)
+        note = await self._pending_reaction_notes(source, session_key) if message_text else ''
+        message_text = f'{note}\n\n{message_text}' if note else message_text
         from gateway.session_context_refs import turn_references
         message_text = await turn_references(self, event, source, session_key, message_text)
         if message_text is None:

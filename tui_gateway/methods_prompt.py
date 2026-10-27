@@ -219,19 +219,8 @@ def _pending_reaction_notes(session: dict) -> str:
     except Exception:
         logger.debug("Failed to read pending reactions", exc_info=True)
         return ""
-    notes = []
-    for entry in pending or ():
-        snippet = (entry.get("text") or "").strip().replace("\n", " ")
-        if len(snippet) > 120:
-            snippet = snippet[:120] + "…"
-        emoji = entry.get("emoji") or ""
-        whose = "their own" if entry.get("role") == "user" else "your"
-        if snippet:
-            notes.append(f'[The user reacted {emoji} to {whose} message: "{snippet}"]')
-        else:
-            # Attachment-only / tool-call-only rows: no quote beats an empty quote.
-            notes.append(f"[The user reacted {emoji} to {whose} earlier message]")
-    return "\n".join(notes)
+    from gateway.session_reactions import reaction_notes
+    return reaction_notes(pending)
 
 
 # ── prompt.submit pieces ────────────────────────────────────────────────────
