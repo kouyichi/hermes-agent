@@ -12,6 +12,13 @@ from hermes_state_runtime import RuntimeStoreError
 
 ACP_END_REASON = 'acp_disconnect'
 
+# The shutdown sweep's key list. Filtering the ACP receipts here keeps the sweep to one statement plus
+# one read per ACP session: the stop's own thread paid a receipt read for every local session before
+# (#145396). ``json_valid`` guards a receipt the store cannot parse, which is not an ACP receipt.
+_ACP_RECEIPT_KEYS = ("SELECT key FROM state_meta WHERE key LIKE ? "
+                     "AND json_extract(CASE WHEN json_valid(value) THEN value END, "
+                     "'$.policy.source')='acp'")
+
 
 def end_idle_acp_session(authority, session_id):
     """End *session_id* iff it is an ACP-created local session with no viewer and an idle FIFO."""
@@ -65,8 +72,11 @@ async def reopen_if_reattached(authority, session_id, ended):
 
 
 def end_idle_acp_sessions(authority):
-    """Gateway shutdown: every ACP session nobody is viewing, attached this run or not."""
+    """Gateway shutdown: every ACP session nobody is viewing, attached this run or not.
+
+    The ACP filter rides the key list, so a store full of non-ACP local sessions costs one statement
+    instead of one receipt read each (#145396); an ACP session still pays its own read to end."""
     with authority.db._read_ctx() as conn:
-        ids = [row[0][len(POLICY_PREFIX):] for row in conn.execute(
-            'SELECT key FROM state_meta WHERE key LIKE ?', (POLICY_PREFIX + '%',))]
+        ids = [row[0][len(POLICY_PREFIX):] for row in conn.execute(_ACP_RECEIPT_KEYS,
+                                                                   (POLICY_PREFIX + '%',))]
     return sum(end_idle_acp_session(authority, sid) for sid in ids)
