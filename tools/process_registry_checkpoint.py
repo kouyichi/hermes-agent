@@ -55,6 +55,18 @@ class ProcessCheckpointMixin:
         except Exception as e:
             logger.debug("Failed to write checkpoint file: %s", e, exc_info=True)
 
+    def persist_checkpoint(self) -> None:
+        """Re-serialize running sessions after a caller armed state on a session it spawned.
+
+        ``spawn_*`` writes the checkpoint while the session still carries its spawn-time
+        defaults; the terminal tool arms ``notify_on_complete`` / ``watch_patterns`` / the
+        heartbeat (and, in gateway mode, the completion watcher's routing) on the session it
+        gets back afterwards. Without this rewrite a gateway that died in between recovered
+        the process with no delivery contract, so the job that outlived the crash finished
+        silently (#145825).
+        """
+        self._write_checkpoint()
+
     def _foreign_handoffs(self, path, known) -> list[dict[str, Any]]:
         """On-disk worker handoffs this registry never tracked whose log still decides an outcome:
         the process is alive (same start time) or its recorded exit is waiting to be read."""

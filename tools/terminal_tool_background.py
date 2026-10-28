@@ -225,6 +225,10 @@ def spawn_background_process(
         if watch_patterns:
             proc_session.watch_patterns = list(watch_patterns)
             result_data["watch_patterns"] = proc_session.watch_patterns
+        # ``_spawn`` already wrote the checkpoint, but everything above armed the session
+        # *after* that write — the durable record must carry the delivery contract this call
+        # just granted, or a gateway crash recovers the process silent (#145825).
+        process_registry.persist_checkpoint()
         return json.dumps(result_data, ensure_ascii=False)
     except Exception as e:
         return json.dumps({
