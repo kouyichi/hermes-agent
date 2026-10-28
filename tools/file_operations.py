@@ -153,6 +153,9 @@ _READ_SENTINEL_PREFIX = "__HERMES_RF_"
 _WRITE_SENTINEL_PREFIX = "__HERMES_WF_"
 _BYTES_SENTINEL_PREFIX = "__HERMES_RB_"
 
+# A sha256 digest's shape. Anything else a ``sha256sum`` reply leads with is transport noise.
+_SHA256_TOKEN = re.compile(r"[0-9a-f]{64}")
+
 
 def _new_sentinel(prefix: str) -> str:
     """Per-call separator line for a compound shell probe. 128 random bits make a
@@ -168,6 +171,22 @@ def _split_segments(output: str, sentinel: str) -> list[str]:
     always ``sentinel + "\n"`` on its own line; the text after the final sentinel
     is the status segment."""
     return output.split(sentinel + "\n")
+
+
+def _digest_from_reply(output: str) -> Optional[str]:
+    """The last sha256 token in a ``sha256sum`` reply, or None.
+
+    Take the token's SHAPE, not ``split()[0]``: on a backend that merges client stderr into
+    stdout that first token is the client's ``Warning:``, which made every write on such a
+    connection look like it had not persisted (#146135). The command's own line comes after
+    any client diagnostics, and a reply with no digest at all is unverifiable, not a mismatch.
+    """
+    digest = None
+    for line in _strip_terminal_fence_leaks(output).splitlines():
+        tokens = line.split()
+        if tokens and _SHA256_TOKEN.fullmatch(tokens[0]):
+            digest = tokens[0]
+    return digest
 
 
 def _json_nonstandard_constant(text: str) -> Optional[str]:
@@ -260,14 +279,18 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
 
     def _has_command(self, cmd: str) -> bool:
         """Check if a command exists in the environment (cached); rg goes through
-        the resolver so a mid-session install becomes visible."""
+        the resolver so a mid-session install becomes visible.
+
+        Match the reply by LINE: the backend merges its client's stderr into stdout, so
+        ``stdout.strip()`` is the client's warning rather than the verdict (#146135)."""
         if cmd == "rg":
             return self._resolve_command(cmd) is not None
         if cmd not in self._command_cache:
             result = self._exec(f"command -v {cmd} >/dev/null 2>&1 && echo 'yes'")
             if result.cwd_error:  # the probe never ran: no verdict to cache
                 return False
-            self._command_cache[cmd] = result.stdout.strip() == 'yes'
+            self._command_cache[cmd] = "yes" in {
+                line.strip() for line in _strip_terminal_fence_leaks(result.stdout or "").splitlines()}
         return self._command_cache[cmd]
 
     def _cat(self, path: str) -> ExecuteResult:
@@ -1498,9 +1521,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         error. ``verified`` is None when the hash could not be taken."""
         try:
             disk_sha = _native_io.sha256_of(self._native_path(path)) if self._native_read_enabled() else None
-            hash_result = None if disk_sha else self._exec(f"sha256sum {self._escape_shell_arg(path)} 2>/dev/null")
-            if hash_result is not None and hash_result.exit_code == 0 and hash_result.stdout.strip():
-                disk_sha = hash_result.stdout.strip().split()[0]
+            hash_result = None if disk_sha else self._exec(
+                f"sha256sum {self._escape_shell_arg(path)} 2>/dev/null")
+            if hash_result is not None:
+                disk_sha = _digest_from_reply(hash_result.stdout or "")
             if disk_sha:
                 if disk_sha != hashlib.sha256(content_bytes).hexdigest():
                     return False, WriteResult(error=(

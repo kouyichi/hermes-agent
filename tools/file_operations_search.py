@@ -17,7 +17,8 @@ from typing import Any, List, Optional
 
 from agent.search_policy import SEARCH_PRUNE_DIR_NAMES
 from tools import interrupt as tool_interrupt
-from tools.file_operations_common import ExecuteResult, SearchMatch, SearchResult
+from tools.file_operations_common import (
+    ExecuteResult, SearchMatch, SearchResult, _strip_terminal_fence_leaks)
 
 _MACOS_TCC_PROTECTED_HOME_DIRS = (
     "Desktop", "Documents", "Downloads", "Library", "Movies", "Music", "Pictures",
@@ -306,11 +307,17 @@ class SearchMixin:
             return bundled
         result = self._exec("command -v rg 2>/dev/null")
         if result.exit_code == 0 and result.stdout.strip():
-            resolved = result.stdout.strip().splitlines()[0]
+            # The shell's answer is the LAST line it printed: a backend that merges its
+            # client's stderr into stdout prepends that noise, and the terminal's own fence
+            # wrapper can follow the payload, so neither end is positional any more (#146135).
+            lines = [line.strip() for line in
+                     _strip_terminal_fence_leaks(result.stdout).splitlines() if line.strip()]
+            resolved = lines[-1] if lines else ""
             if resolved == "yes":  # compatibility with old boolean-probe fakes
                 resolved = "rg"
-            self._rg_resolution_cache[cmd] = resolved
-            return resolved
+            if resolved:
+                self._rg_resolution_cache[cmd] = resolved
+                return resolved
 
         if _IS_WINDOWS and on_host:
             user_profile = os.environ.get("USERPROFILE") or str(Path.home())

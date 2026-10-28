@@ -12,6 +12,7 @@ import asyncio
 import base64
 import os
 import re
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -245,7 +246,11 @@ async def _resolve_container_fallback(
     # Bound the read INSIDE the sandbox: head -c caps at ingest-limit+1 (+1 distinguishes "at the
     # cap" from "over") so /dev/zero can't stream unbounded base64 into host memory. The input
     # redirect avoids argv (leading-dash paths); tr -d instead of GNU-only base64 -w0 (BusyBox).
-    cmd = f"head -c {_MAX_INGEST_BYTES + 1} < {shlex.quote(str(p))} | base64 | tr -d '\\n'"
+    # The reply is FENCED: docker/ssh merge their client's stderr into stdout, so a client warning
+    # (a stale ssh identity file, an accept-new host-key notice) would otherwise decode as payload.
+    sentinel = f"__HERMES_IS_{secrets.token_hex(16)}__"
+    cmd = (f"echo {sentinel}; head -c {_MAX_INGEST_BYTES + 1} < {shlex.quote(str(p))} "
+           f"| base64 | tr -d '\\n'")
     last_res: dict = {"returncode": 1, "output": ""}
     for attempt in range(2):
         last_res = await asyncio.to_thread(env.execute, cmd)
@@ -258,8 +263,12 @@ async def _resolve_container_fallback(
         first = next((ln.strip() for ln in diag if ln.strip()), "")
         suffix = f" ({first[:200]})" if first else ""
         raise SourceNotFound(f"could not read '{p}' inside the sandbox{suffix}", src=src, origin="container")
+    output = last_res.get("output", "")
+    # Everything before the marker is the client's own; a reply without one is the unfenced
+    # shape older fakes and a shell that ate the echo still emit, so keep decoding it whole.
+    payload = output.partition(sentinel)[2] if sentinel in output else output
     try:
-        data = base64.b64decode(last_res.get("output", ""), validate=True)
+        data = base64.b64decode(payload.strip(), validate=True)
     except Exception as exc:
         raise NotAnImage(f"sandbox returned non-image data for '{p}': {exc}", src=src)
     if len(data) > _MAX_INGEST_BYTES:
