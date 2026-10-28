@@ -10,6 +10,7 @@ through it at call time.
 import fnmatch
 import logging
 import re
+import shlex
 import time
 import uuid
 from tools import approval_context as _ctx
@@ -136,16 +137,44 @@ _SHELL_CONTROL_CHARS = frozenset("\n\r;&|<>`$()")
 
 _REINTERPRETED_ARGUMENT_RE = re.compile(r"(?:^|[ \t])(?:-[^-\s]*[ce]|--(?:command|eval))(?:[= \t]|$)")
 
+# `-v` resolves its operand as a variable reference and evaluates an array subscript as an
+# arithmetic string, so `test -v 'a[$(cmd)]'` runs `cmd` even with the operand single-quoted
+# (bash >= 4.2; measured on 5.3 for `test`, `[` and `[[`). Quoting is not proof of a literal
+# argument for these spellings, and the allowlist shortcut runs before the pattern gate.
+_V_OPERAND_COMMANDS = frozenset({"test", "[", "[["})
+
+
+def _v_operand_evaluates_subscript(command: str) -> bool:
+    """True when a ``test``/``[``/``[[`` command hands ``-v`` an operand whose subscript contains a
+    command substitution (``$(...)`` or backticks)."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if len(tokens) < 3 or tokens[0] not in _V_OPERAND_COMMANDS:
+        return False
+    for index, token in enumerate(tokens[:-1]):
+        operand = tokens[index + 1]
+        if token != "-v" or "[" not in operand or "]" not in operand:
+            continue
+        subscript = operand[operand.index("["):operand.rindex("]")]
+        if "$(" in subscript or "`" in subscript:
+            return True
+    return False
+
 
 def _has_allowlist_shell_operator(command: str) -> bool:
     """Return True when a command is too compound for the allowlist shortcut.
     Quote-aware: metacharacters inside quotes or behind a backslash are literal
     arguments (``cargo bench -- '^a(b|c)$'``), not shell syntax. Still
     disqualifying: ``$`` or backtick inside DOUBLE quotes (expansion stays
-    active), and any quoted/escaped control character when the command also
-    carries a ``-c``/``-e``/``--command``/``--eval``-style option that would
-    hand the quoted text to another interpreter."""
+    active), quoted control characters when the command also carries a
+    ``-c``/``-e``/``--command``/``--eval``-style option that would hand the
+    quoted text to another interpreter, and a ``-v`` operand whose subscript
+    bash evaluates."""
     command = command or ""
+    if _v_operand_evaluates_subscript(command):
+        return True
     quote = None  # None | "'" | '"'
     has_reinterpretable = False
     i = 0

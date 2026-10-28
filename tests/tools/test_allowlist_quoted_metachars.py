@@ -117,3 +117,39 @@ class TestAllowlistGlobWithQuotedArgs:
         assert not _command_matches_permanent_allowlist(
             "git -c alias.x='!touch /tmp/pwn; printf ok' x"
         )
+
+
+class TestTestVBuiltinOperand:
+    """A `-v` operand's array subscript is evaluated, so quoting it is not enough.
+
+    `test -v 'a[$(cmd)]'` runs `cmd`: bash resolves the subscript as an arithmetic string even
+    though the operand arrives single-quoted (measured on bash 5.3; `-v` needs >= 4.2). The
+    allowlist shortcut runs BEFORE `detect_dangerous_command`, so a glob entry such as ``test *``
+    would auto-approve the substitution without the pattern gate ever seeing it.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        "test -v 'a[$(rm -rf ~/x)]'",
+        "test -v 'a[`rm -rf ~/x`]'",
+        "[[ -v 'a[$(id)]' ]]",
+        "[ -v 'a[$(id)]' ]",
+    ])
+    def test_subscript_substitution_is_compound(self, cmd):
+        assert _has_allowlist_shell_operator(cmd)
+
+    @pytest.mark.parametrize("cmd", [
+        "test -f foo",
+        "test -v 'a[x]'",          # plain subscript: nothing for bash to evaluate
+        "test -v SHELL",           # a bare name
+        "test -n '$(x)'",          # -n takes text, not a variable reference
+        "cargo bench -- '^a(b|c)$'",
+    ])
+    def test_non_v_operands_stay_simple(self, cmd):
+        assert not _has_allowlist_shell_operator(cmd)
+
+    def test_glob_refuses_test_v_subscript(self, monkeypatch):
+        import tools.approval as mod
+        monkeypatch.setattr(mod, "_permanent_approved", {"test *"})
+        assert not _command_matches_permanent_allowlist("test -v 'a[$(rm -rf ~/x)]'")
+        # The same glob still approves an ordinary test invocation.
+        assert _command_matches_permanent_allowlist("test -f /etc/hostname")
