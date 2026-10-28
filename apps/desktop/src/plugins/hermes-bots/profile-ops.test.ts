@@ -269,3 +269,54 @@ describe('roster avatar sync (#102978)', () => {
     expect($botMeta.get()['local::secretary']?.image).toBeUndefined()
   })
 })
+
+/**
+ * A roster row that never says whether the server has an avatar is not the same
+ * as one that says it does not (#145855). Union-roster rows (`via=primary-shared`)
+ * are built from `/api/profiles`, whose `_profile_to_dict` carried no
+ * `has_avatar`, so every non-active local profile reached the backfill with
+ * `has_avatar` undefined — and the rasterized face was pushed over real art on
+ * every Desktop launch.
+ */
+describe('avatar backfill treats an unknown server avatar as present (#145855)', () => {
+  const cachedArt = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=='
+
+  function setAssetCalls() {
+    return hostMock.request.mock.calls.filter(([method]) => method === 'profiles.set_asset')
+  }
+
+  it('does not push cached art over a row whose has_avatar is unknown', async () => {
+    const { pullServerAvatars } = await import('./profile-ops')
+    $botMeta.set({ 'local::alpha': { image: cachedArt } })
+
+    pullServerAvatars([
+      {
+        connectionId: 'local',
+        name: 'alpha',
+        route: { connectionId: 'local', mode: 'local', profile: 'alpha', targetProfile: 'alpha' },
+        sourceScoped: true
+      } as RosterRow
+    ])
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(setAssetCalls()).toEqual([])
+  })
+
+  it('still backfills when the server reports no avatar', async () => {
+    const { pullServerAvatars } = await import('./profile-ops')
+    $botMeta.set({ 'local::beta': { image: cachedArt } })
+
+    pullServerAvatars([
+      {
+        connectionId: 'local',
+        has_avatar: false,
+        name: 'beta',
+        route: { connectionId: 'local', mode: 'local', profile: 'beta', targetProfile: 'beta' },
+        sourceScoped: true
+      } as RosterRow
+    ])
+    await vi.waitFor(() => expect(setAssetCalls()).toHaveLength(1))
+
+    expect(setAssetCalls()[0][1]).toEqual({ asset: 'avatar', data: cachedArt, name: 'beta' })
+  })
+})

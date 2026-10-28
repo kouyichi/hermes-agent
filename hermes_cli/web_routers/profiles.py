@@ -83,11 +83,15 @@ _spawn_hermes_action = late("_spawn_hermes_action", "hermes_cli.web_server_gatew
 
 def _profile_to_dict(info) -> dict[str, Any]:
     attr = functools.partial(getattr, info)
+    # Same three extensions the gateway's roster probe accepts, so a profile read over
+    # /api/profiles and one read over `profiles.list` agree on "this profile has art".
+    assets = Path(str(attr("path", ""))) / "assets"
     return {
         "name": attr("name", ""), "path": str(attr("path", "")),
         "is_default": bool(attr("is_default", False)),
         "model": attr("model", None), "provider": attr("provider", None),
         "has_env": bool(attr("has_env", False)),
+        "has_avatar": any((assets / f"avatar.{ext}").is_file() for ext in ("png", "jpg", "webp")),
         "skill_count": int(attr("skill_count", 0) or 0),
         "gateway_running": bool(attr("gateway_running", False)),
         "description": attr("description", "") or "",

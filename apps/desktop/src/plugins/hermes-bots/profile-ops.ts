@@ -58,14 +58,16 @@ function requestAssetOnActiveSource<T>(bot: RosterRow, method: string, params: R
   return host.request<T>(method, { ...params, name: route ? route.targetProfile || route.profile : bot.name })
 }
 
-/** Backfill: local meta has art the server lacks -> profiles.set_asset.
- *  Server-side avatars power the inter-agent notice pfp (core #85855) and
- *  cross-machine roster art, so local-only images are a bug, not a state. */
+/** Backfill: local meta has art the server LACKS -> profiles.set_asset. A row that never
+ *  said whether the server has one is not that row (#145855: a union row built from
+ *  /api/profiles pushed its cached face over real art). Server art powers the notice pfp. */
 function pushLocalAvatars(roster: RosterRow[]) {
   for (const bot of roster) {
     const key = botMetaKey(bot)
 
-    if (bot.has_avatar || avatarPushInflight.has(key)) {
+    // `false` is the only answer that means "the server has none". Unknown (undefined:
+    // thin union rows, offline ghosts) must never overwrite art this cache has not seen.
+    if (bot.has_avatar !== false || avatarPushInflight.has(key)) {
       continue
     }
 
