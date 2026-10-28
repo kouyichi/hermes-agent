@@ -8381,6 +8381,7 @@
               "cli",
               "tui",
               "gui",
+              "desktop",
               "acp",
               "tool",
               "oneshot"
