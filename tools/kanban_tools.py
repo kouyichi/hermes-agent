@@ -540,6 +540,25 @@ _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 _auto_heartbeat_last_attempt: float = 0.0
 _auto_heartbeat_fence_warned = False
 
+# Liveness writes are SKIPPED, never queued: the auto-heartbeat runs inline on the turn
+# thread (the streaming monitor's 30s tick), so inheriting the interactive busy-timeout
+# ladder (120s, retried by the transaction boundary ≈ 720s) parked the turn against a
+# write-locked board and the stream stale watchdog never got to evaluate its threshold —
+# the turn was aborted by the liveness watchdog instead of retried (#145886). A missed
+# beat is harmless: the next 60s tick writes again.
+_LIVENESS_BUSY_TIMEOUT_MS = 250
+
+
+def _set_liveness_busy_timeout(conn: Any) -> None:
+    """Cap ``conn``'s SQLite busy wait for a best-effort liveness write.
+
+    ``kanban_db_connect`` sizes its timeout for claim/dispatch writes that must outlast a
+    worker stampede (``HERMES_KANBAN_BUSY_TIMEOUT_MS``). Liveness has the opposite
+    priority: skipping one beat costs nothing, blocking the caller can cost the turn
+    (#145886), so this connection gives up after ``_LIVENESS_BUSY_TIMEOUT_MS``.
+    """
+    conn.execute(f"PRAGMA busy_timeout={_LIVENESS_BUSY_TIMEOUT_MS}")
+
 
 def register_current_worker_from_env() -> bool:
     """Record this worker's pid on its run when the dispatcher died before it could
@@ -576,6 +595,7 @@ def heartbeat_current_worker_from_env() -> bool:
     try:
         from hermes_cli import kanban_db_dispatch as kbd
         with _board(None, quiet_close=True) as (kb, conn):
+            _set_liveness_busy_timeout(conn)
             ops = ((kb.heartbeat_claim, {"claimer": os.environ.get("HERMES_KANBAN_CLAIM_LOCK")}),
                    (kbd.heartbeat_worker, {"note": None, "expected_run_id": _worker_run_id(tid)}))
             succeeded = True
