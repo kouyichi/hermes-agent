@@ -152,15 +152,23 @@ function toolTarget(tool: ToolCallLike): string {
 }
 
 /**
- * One clause per category. A category holding a single thing says what it was
- * ("Edited wiring.tsx"); anything else counts ("explored 3 files"). A settled
- * command is the exception — "ran 5 commands" is the useful reading, and a
- * command line only earns its space while it's the thing you're waiting on.
+ * How many things a group of calls acted on.
  */
-function clause(category: RunCategory, tools: ToolCallLike[], live: boolean): string {
+function units(tools: ToolCallLike[]): number {
+  return tools.reduce((sum, tool) => sum + unitCount(tool), 0)
+}
+
+/**
+ * How one group of calls reads, in the tense its own work is in. A group
+ * holding a single thing says what it was ("Edited wiring.tsx"); anything else
+ * counts ("explored 3 files"). A settled command is the exception — "ran 5
+ * commands" is the useful reading, and a command line only earns its space
+ * while it's the thing you're waiting on.
+ */
+function counted(category: RunCategory, tools: ToolCallLike[], live: boolean): string {
   const copy = CATEGORY_COPY[category]
   const verb = live ? copy.present : copy.past
-  const count = tools.reduce((sum, tool) => sum + unitCount(tool), 0)
+  const count = units(tools)
   const target = count === 1 && category !== 'interact' ? toolTarget(tools[0]) : ''
 
   if (target && (live || category !== 'run')) {
@@ -170,15 +178,36 @@ function clause(category: RunCategory, tools: ToolCallLike[], live: boolean): st
   return `${verb} ${count} ${copy.noun[count === 1 ? 0 : 1]}`
 }
 
+/**
+ * One or two clauses per category. While a category narrates, only the calls
+ * still in flight speak in the present tense: the settled ones have already
+ * run, so counting them under the present verb claimed work that was over — a
+ * long sequential turn read "Running 23 commands" with one in flight (#145748).
+ * The two halves are separate clauses, "ran 22 commands, running 1 command", so
+ * the settled work keeps its own past-tense count.
+ */
+function clauses(category: RunCategory, tools: ToolCallLike[], live: boolean): string[] {
+  const pending = tools.filter(isPending)
+  const pendingCount = units(pending)
+
+  if (!live || pendingCount === 0 || pendingCount === units(tools)) {
+    return [counted(category, tools, live)]
+  }
+
+  const settled = tools.filter(tool => !isPending(tool))
+
+  return [counted(category, settled, false), counted(category, pending, true)]
+}
+
 function lowerFirst(text: string): string {
   return text.charAt(0).toLowerCase() + text.slice(1)
 }
 
 /**
  * Collapse a run of tool calls into the single grey line that stands in for it
- * — "Explored 3 files, ran 5 commands". While the run is live, the category
- * holding its most recent call speaks in the present tense so the line reads as
- * work in progress rather than work already done.
+ * — "Explored 3 files, ran 5 commands". While the run is live, the calls still
+ * in flight in its most recent category speak in the present tense, so the line
+ * reads as work in progress without counting finished work as running.
  *
  * Whether the run is `live` is the caller's to say, not something readable off
  * the calls: a call can be left without a result by a turn that ended or an
@@ -219,17 +248,17 @@ export function summarizeToolRun(tools: readonly ToolCallLike[], live: boolean):
     }
   }
 
-  const clauses = CATEGORY_ORDER.flatMap(category => {
+  const runClauses = CATEGORY_ORDER.flatMap(category => {
     const group = byCategory.get(category)
 
-    return group ? [clause(category, group, category === liveCategory)] : []
+    return group ? clauses(category, group, category === liveCategory) : []
   })
 
   const failed = tools.filter(toolCallFailed).length
 
   if (failed) {
-    clauses.push(translateNow('assistant.tool.failedCalls', failed))
+    runClauses.push(translateNow('assistant.tool.failedCalls', failed))
   }
 
-  return [...skillClauses, ...clauses].map((text, index) => (index === 0 ? text : lowerFirst(text))).join(', ')
+  return [...skillClauses, ...runClauses].map((text, index) => (index === 0 ? text : lowerFirst(text))).join(', ')
 }

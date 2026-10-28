@@ -43,7 +43,23 @@ describe('summarizeToolRun', () => {
 
   it('puts the running category in the present tense and leaves the rest past', () => {
     expect(running([read('a.ts'), tool('read_file', { path: 'b.ts' }), ran('x'), ran('y')])).toBe(
-      'Exploring 2 files, ran 2 commands'
+      'Explored a.ts, exploring b.ts, ran 2 commands'
+    )
+  })
+
+  // A live category used to apply the present tense to every call it held, so a
+  // long sequential run read "Running 23 commands" with 22 of them finished and
+  // only the last in flight. The present-tense count is now the pending work
+  // alone; the settled work reads as past (#145748).
+  it('counts only the command still in flight in the present tense', () => {
+    expect(running([ran('a'), ran('b'), tool('terminal', { command: 'npm run typecheck' })])).toBe(
+      'Ran 2 commands, running npm run typecheck'
+    )
+  })
+
+  it('splits a live category into its settled and pending work', () => {
+    expect(running([read('a.ts'), read('b.ts'), tool('read_file', { path: 'c.ts' })])).toBe(
+      'Explored 2 files, exploring c.ts'
     )
   })
 
