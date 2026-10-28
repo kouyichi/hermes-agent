@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 from hermes_cli import auth as auth_mod
 from agent.credential_pool import (  # custom_provider_pool_key_candidates is read via origin by runtime_provider_custom
-    CredentialPool, PooledCredential, credential_pool_matches_provider, custom_provider_pool_key_candidates,
-    load_pool,
+    AUTH_TYPE_API_KEY, CredentialPool, PooledCredential, credential_pool_matches_provider,
+    custom_provider_pool_key_candidates, load_pool,
 )
 from agent.secret_scope import get_secret_str
 from hermes_cli.auth import (  # resolve_external_process_provider_credentials is read via origin by runtime_provider_backends
@@ -708,9 +708,39 @@ def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: dict[s
 # ── explicit (--api-key / --base-url) path ─────────────────────────────────────────────────
 
 
+def _anthropic_pool_api_key(target_model: Optional[str]) -> str:
+    """A pooled ``api_key`` entry for Anthropic, or "" — the credential the explicit rung skipped.
+
+    ``resolve_anthropic_token`` reads env keys and OAuth grants only (it is the read-only token
+    resolver), so once this rung was taken with a base URL and no key, an install whose only
+    Anthropic credential is an ``api_key`` row in ``auth.json`` raised "No Anthropic credentials
+    found" (#146226) — even though the same provider resolves fine on the pool rung. The registry
+    api_key providers already fall back to their pool in exactly this situation
+    (``hermes_cli.auth._resolve_api_key_provider_secret``). OAuth rows are deliberately not taken
+    here: the token resolver owns their refresh/rotation.
+    """
+    try:
+        pool = load_pool("anthropic")
+        entry = pool.select(model=target_model or None) if pool.has_credentials() else None
+    except Exception:  # health: allow BLE001 -- an unreadable pool store must not replace the auth error
+        logger.debug("Anthropic credential pool unavailable on the explicit rung", exc_info=True)
+        return ""
+    if entry is None or getattr(entry, "auth_type", None) != AUTH_TYPE_API_KEY:
+        return ""
+    return str(_pool_entry_api_key(entry) or "").strip()
+
+
+def _anthropic_explicit_token(target_model: Optional[str]) -> str:
+    """Token for the explicit ``--base-url`` rung: env/OAuth first (the documented order), then a
+    pooled ``api_key`` row, then the error that names how to sign in."""
+    from agent.anthropic_credentials import resolve_anthropic_token
+    return (resolve_anthropic_token(model=target_model) or _anthropic_pool_api_key(target_model)
+            or _anthropic_token_or_raise(model=target_model))
+
+
 def _explicit_anthropic(requested_provider, model_cfg, api_key, base_url, target_model):
     base_url = base_url or _anthropic_cfg_base_url(model_cfg) or _ANTHROPIC_DEFAULT_BASE_URL
-    api_key = api_key or _anthropic_token_or_raise(model=target_model)
+    api_key = api_key or _anthropic_explicit_token(target_model)
     return _runtime("anthropic", "anthropic_messages", base_url, api_key, source="explicit", requested_provider=requested_provider)
 
 
