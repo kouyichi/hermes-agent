@@ -101,6 +101,18 @@ def _same_chat_key_slots(
     return None
 
 
+def log_slot_refusal(session_key: str, refusal: Any) -> None:
+    """Log why ``_claim_active_session_slot`` refused: an unreadable registry is an operator-side
+    file repair, not the concurrency cap, and every refusal logged as "max_concurrent_sessions
+    reached" sent readers after the wrong knob (#145807)."""
+    from hermes_cli.active_sessions import SESSION_COORDINATION_UNAVAILABLE
+
+    if getattr(refusal, "reason", None) == SESSION_COORDINATION_UNAVAILABLE:
+        logger.warning("Refusing new active session %s: %s", session_key, refusal)
+        return
+    logger.info("Rejecting new active session %s: max_concurrent_sessions reached", session_key)
+
+
 class GatewayBusySessionMixin:
     """Busy-session queueing, slot claims, slash dispatch tables, destructive-slash confirmation."""
 
@@ -333,11 +345,12 @@ class GatewayBusySessionMixin:
             return None, None
         limit_message = self._active_session_limit_message(session_key)
         if limit_message is not None:
+            log_slot_refusal(session_key, limit_message)
             return None, limit_message
         try:
             from hermes_cli.active_sessions import try_acquire_active_session
             platform = source.platform.value if source and source.platform else "gateway"
-            return try_acquire_active_session(
+            lease, refusal = try_acquire_active_session(
                 session_id=session_key,
                 surface=f"gateway:{platform}",
                 config=getattr(self, "config", None),
@@ -354,6 +367,9 @@ class GatewayBusySessionMixin:
                     "live_session_id": str(session_key),
                 },
             )
+            if refusal is not None:
+                log_slot_refusal(session_key, refusal)
+            return lease, refusal
         except Exception as exc:
             logger.warning("Failed to claim active session slot: %s", exc)
             return None, None

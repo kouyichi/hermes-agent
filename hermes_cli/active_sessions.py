@@ -230,13 +230,36 @@ class _FileLock:
             fh.close()
 
 
+def _complete_document_before_trailing_bytes(text: str, path: Path) -> Any:
+    """The document a registry file holds when its bytes are one complete JSON value followed by
+    garbage — a tear from a process that died mid-flush, or a foreign write landing on a reused
+    file descriptor: a TLS ``close_notify`` record was written into this file at a one-shot exit,
+    which turned every new session into ``SESSION_COORDINATION_UNAVAILABLE`` (#145807).
+
+    A complete document is authoritative, so its entries are read and the tail dropped (the next
+    ``_write_entries`` replaces the file wholesale). Anything else — empty, truncated, a partial
+    object — stays unreadable: the fail-closed contract is about a registry we cannot parse, and
+    a truncated file is exactly that.
+    """
+    stripped = text.lstrip()
+    data, end = json.JSONDecoder().raw_decode(stripped)
+    trailing = len(stripped) - end
+    if trailing <= 0:  # valid JSON plus whitespace already parses; nothing was salvaged
+        raise ValueError("no trailing bytes to salvage")
+    logger.warning(
+        "Active session registry at %s has %d trailing byte(s) after a complete JSON document; "
+        "ignoring them and reading its entries (rewritten on the next registry write)",
+        path, trailing)
+    return data
+
+
 def _read_entries(path: Path, *, strict: bool = False) -> list[dict[str, Any]]:
     def invalid(what: str) -> ActiveSessionRegistryError:
         return ActiveSessionRegistryError(f"active session registry {what}: {path}")
 
     try:
         with open(path, "r", encoding="utf-8-sig") as fh:
-            data = json.load(fh)
+            text = fh.read()
     except FileNotFoundError:
         return []
     except Exception as exc:
@@ -244,6 +267,16 @@ def _read_entries(path: Path, *, strict: bool = False) -> list[dict[str, Any]]:
             raise invalid("unreadable") from exc
         logger.warning("Ignoring corrupt active session registry at %s", path)
         return []
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        try:
+            data = _complete_document_before_trailing_bytes(text, path)
+        except ValueError:
+            if strict:
+                raise invalid("unreadable") from exc
+            logger.warning("Ignoring corrupt active session registry at %s", path)
+            return []
     entries = data.get("entries") if isinstance(data, dict) else data
     if not isinstance(entries, list):
         if strict:
