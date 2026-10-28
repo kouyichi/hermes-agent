@@ -211,15 +211,20 @@ class StreamingWaitMonitor:
                 self.agent._emit_wait_notice("")
                 self._mon.wait_notice_started_ts = None
                 self._mon.wait_notice.reset()
-            if _hb_now - self._mon.last_heartbeat >= _HEARTBEAT_INTERVAL:
-                self._mon.last_heartbeat = _hb_now
-                self._heartbeat(int(_hb_now - self.last_chunk_time["t"]))
+            # The watchdog's own decision must not depend on liveness I/O: the heartbeat
+            # below writes the kanban board on this thread and can be parked by a long
+            # writer, so a threshold already crossed is acted on before the heartbeat
+            # (#145886). After a kill the reconnect status owns the line — skip the notice.
             _stale_elapsed = time.time() - self.last_chunk_time["t"]
-            if _stale_elapsed > self._stream_stale_timeout:
+            _stale = _stale_elapsed > self._stream_stale_timeout
+            if _stale:
                 self._mon.wait_notice_started_ts = None  # Reconnect status has its own owner.
                 self._mon.wait_notice.reset()
                 self._kill_stale_stream(_stale_elapsed)
             if self.agent._interrupt_requested:
                 self._abort_for_interrupt(_stale_elapsed)
                 return
+            if not _stale and _hb_now - self._mon.last_heartbeat >= _HEARTBEAT_INTERVAL:
+                self._mon.last_heartbeat = _hb_now
+                self._heartbeat(int(_hb_now - self.last_chunk_time["t"]))
 
