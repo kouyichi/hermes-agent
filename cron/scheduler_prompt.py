@@ -77,6 +77,13 @@ _PROMPT_FRAME_RE = re.compile(
     rf"(?m)^{re.escape(_PROMPT_FRAME)}(\d+)\n{re.escape(_PROMPT_HEADING)}")
 _RESPONSE_FRAME_RE = re.compile(
     rf"(?m)^{re.escape(_RESPONSE_FRAME)}(\d+)\n{re.escape(_RESPONSE_HEADING)}")
+# A stored prompt can be shorter than the ``_PROMPT_FRAME`` stamp that precedes it (measured drift:
+# +9 characters on two skill-bearing jobs), which pushes the computed response offset past the
+# writer's frame. The reader scans this much around that offset for the frame instead of losing the
+# answer (#146017). Bounded, and only frames whose declared length is the whole remaining tail are
+# accepted, so a truncated write stays unusable.
+_FRAME_DRIFT_SLACK = 4096
+
 
 
 def _job_doc_header(job_name: str, job_id: str, now_iso: str, mode: str) -> str:
@@ -87,6 +94,41 @@ def _job_doc_header(job_name: str, job_id: str, now_iso: str, mode: str) -> str:
         f"**Run Time:** {now_iso}\n"
         f"**Mode:** {mode}\n"
     )
+
+
+def _frame_is_intact(frame: re.Match[str], tail: str) -> bool:
+    """True when the frame's declared length is exactly the remaining tail, terminator included."""
+    return len(tail) == int(frame.group(1)) + len(_RESPONSE_TERMINATOR) and tail.endswith(_RESPONSE_TERMINATOR)
+
+
+def _response_frame(archive: str, expected: int) -> tuple[re.Match[str] | None, str]:
+    """The writer's response frame for ``expected`` offset, and its validated tail.
+
+    A frame written at the computed offset is authoritative: one that fails its own length is a
+    truncated write, so the answer is unusable and no other frame may stand in for it. Only when no
+    frame sits at that offset — a prompt stamp that drifted from the stored prompt — is a nearby
+    frame accepted, nearest first, and only when its declared length is the whole remaining tail.
+    That is the property a frame quoted inside the prompt or the answer cannot satisfy.
+    """
+    frame = _RESPONSE_FRAME_RE.match(archive, expected)
+    if frame is not None:
+        tail = archive[frame.end():]
+        return (frame, tail) if _frame_is_intact(frame, tail) else (None, "")
+    start, end = max(0, expected - _FRAME_DRIFT_SLACK), min(len(archive), expected + _FRAME_DRIFT_SLACK)
+    candidates = [
+        (abs(candidate.start() - expected), candidate.start(), candidate, archive[candidate.end():])
+        for candidate in _RESPONSE_FRAME_RE.finditer(archive, start, end)
+        if _frame_is_intact(candidate, archive[candidate.end():])
+    ]
+    if not candidates:
+        return None, ""
+    _distance, at, candidate, tail = min(candidates, key=lambda item: (item[0], item[1]))
+    logger.warning(
+        "context_from: prompt length stamp drifted by %d characters; recovered the response frame "
+        "by scanning %d characters around the computed offset",
+        expected - at, _FRAME_DRIFT_SLACK,
+    )
+    return candidate, tail
 
 
 def _archive_answer(archive: str) -> str | None:
@@ -111,11 +153,9 @@ def _archive_answer(archive: str) -> str | None:
     if (prompt_frame is not None
             and archive.find(_PROMPT_HEADING) == prompt_frame.end() - len(_PROMPT_HEADING)):
         response_start = prompt_frame.end() + int(prompt_frame.group(1)) + len(_PROMPT_SEPARATOR)
-        frame = _RESPONSE_FRAME_RE.match(archive, response_start)
-        tail = archive[frame.end():] if frame is not None else ""
+        frame, tail = _response_frame(archive, response_start)
         # A missing or truncated writer-owned boundary is unusable.
-        if (frame is None or len(tail) != int(frame.group(1)) + len(_RESPONSE_TERMINATOR)
-                or not tail.endswith(_RESPONSE_TERMINATOR)):
+        if frame is None:
             return None
         answer = tail[:-len(_RESPONSE_TERMINATOR)].strip()
     elif "## Response" not in archive:
