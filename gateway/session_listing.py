@@ -21,7 +21,7 @@ def _excluded_sources():
 def _picker_row(row, tip, sid):
     return {'id': row['id'], 'session_id': sid, 'resolved_id': sid, 'title': row.get('title') or '',
             'source': tip['source'], 'started_at': row.get('started_at'),
-            'message_count': row.get('message_count', 0), 'model': tip.get('model'), 'running': False}
+            'message_count': row.get('message_count', 0), 'model': tip.get('model') or '', 'running': False}
 
 
 def stored_picker_sessions(authority, actor, *, limit, include_hidden=False):
@@ -106,7 +106,7 @@ def _closed_local_session(authority, actor, row, tip):
             return None
     return {'id': owner, 'session_id': owner, 'resolved_id': owner, 'title': tip.get('title') or row.get('title') or '',
             'source': tip['source'], 'started_at': row.get('started_at'),
-            'message_count': row.get('message_count', 0), 'model': tip.get('model'), 'running': False}
+            'message_count': row.get('message_count', 0), 'model': tip.get('model') or '', 'running': False}
 
 
 def _stored_closed(authority, actor, owner):

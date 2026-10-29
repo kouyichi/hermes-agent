@@ -601,7 +601,7 @@ class AuthorityConnection:
                 continue
             sessions.append({'session_id': entry.session_id, 'id': entry.session_id, 'title': row.get('title') or '',
                              'source': row.get('source'), 'started_at': row.get('started_at'),
-                             'message_count': row.get('message_count', 0), 'model': row.get('model'),
+                             'message_count': row.get('message_count', 0), 'model': row.get('model') or '',
                              'running': entry.handle.execution_state == 'running'})
         sessions.sort(key=lambda row: row['started_at'] or 0, reverse=True)
         return {'sessions': sessions[:limit], 'scope': 'live'}
