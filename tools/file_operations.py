@@ -153,6 +153,20 @@ _READ_SENTINEL_PREFIX = "__HERMES_RF_"
 _WRITE_SENTINEL_PREFIX = "__HERMES_WF_"
 _BYTES_SENTINEL_PREFIX = "__HERMES_RB_"
 
+# Last line the atomic-write script prints: whether IT had to make the target's
+# parent directory (``1``) or the parent was already there (``0``). Carried on
+# stdout because a failure aborts the script under ``set -e`` before this line, so
+# a present marker always means the swap happened.
+_DIRS_CREATED_MARK = "__HERMES_DIRS_CREATED__"
+
+
+def _dirs_created_from_write_reply(result: ExecuteResult) -> bool:
+    """Whether the atomic-write script reported creating the parent directory."""
+    for line in reversed(_strip_terminal_fence_leaks(result.stdout or "").splitlines()):
+        if line.strip().startswith(_DIRS_CREATED_MARK + ":"):
+            return line.strip().rsplit(":", 1)[1] == "1"
+    return False
+
 
 def _new_sentinel(prefix: str) -> str:
     """Per-call separator line for a compound shell probe. 128 random bits make a
@@ -566,10 +580,14 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             arg = _msys_to_windows_path(arg).replace("\\", "/")
         return "'" + arg.replace("'", "'\"'\"'") + "'"
 
-    def _atomic_write(self, path: str, content: str) -> ExecuteResult:
+    def _atomic_write(self, path: str, content: str) -> tuple[ExecuteResult, bool]:
         """Write ``content`` atomically: stdin → temp file in the SAME directory →
         ``mv -f`` (same-FS rename; cross-device ``mv`` is copy+unlink, NOT atomic).
         ``mkdir -p`` folded in. Exit 0 = swap happened; non-zero = original intact.
+        Returns ``(result, dirs_created)`` where ``dirs_created`` is True only when
+        THIS call had to make the target's parent — the answer comes from the same
+        step that does the mkdir, so it needs no extra round-trip and never claims a
+        folder creation for a write into an existing one (#146410).
 
         Symlink targets are resolved first (replacing the link would orphan the
         target) and the temp dir recomputed from the RESOLVED target. Existing
@@ -581,8 +599,11 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         The local POSIX backend does the same in-process (``tools.file_operations_native``).
         """
         if self._native_read_enabled():
-            error = _native_io.atomic_write(self._native_path(path), content.encode("utf-8", "surrogateescape"))
-            return ExecuteResult(stdout=error or "", exit_code=1 if error else 0)
+            native = self._native_path(path)
+            target = os.path.realpath(native) if os.path.islink(native) else native
+            dirs_created = not os.path.isdir(os.path.dirname(target) or ".")
+            error = _native_io.atomic_write(native, content.encode("utf-8", "surrogateescape"))
+            return ExecuteResult(stdout=error or "", exit_code=1 if error else 0), dirs_created and not error
         q_path = self._escape_shell_arg(path)
         q_parent = self._escape_shell_arg(os.path.dirname(path) or ".")
         tmpl = self._escape_shell_arg(".hermes-tmp.XXXXXX")
@@ -608,7 +629,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             'rt="$(readlink -f "$t" 2>/dev/null || realpath "$t" 2>/dev/null || true)"; '
             '[ -n "$rt" ] && { t="$rt"; d="$(dirname "$t")"; }; '
             "fi; "
-            'mkdir -p "$d"; '
+            'if [ -d "$d" ]; then c=0; else c=1; mkdir -p "$d"; fi; '
             'tmp="$(mktemp -p "$d" ' + tmpl + ' 2>/dev/null '
             '|| mktemp "$d/.hermes-tmp.$$.XXXXXX" 2>/dev/null '
             '|| { tmp="$d/.hermes-tmp.$$"; : > "$tmp" && echo "$tmp"; })"; '
@@ -623,8 +644,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             # write-masking umask can't EACCES the stream; quoted "=rw" so zsh doesn't =word-expand it.
             'if [ ! -e "$t" ]; then chmod "=rw" "$tmp" 2>/dev/null || true; fi; '
             'mv -f "$tmp" "$t"; '
+            'echo "' + _DIRS_CREATED_MARK + ':${c}"; '
             "trap - EXIT")
-        return self._exec(script, stdin_data=content)
+        result = self._exec(script, stdin_data=content)
+        return result, _dirs_created_from_write_reply(result)
 
     def _file_has_bom(self, path: str, pre_content: Optional[str] = None) -> bool:
         """Whether the on-disk file starts with a UTF-8 BOM. ALWAYS probes disk:
@@ -1552,14 +1575,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             content = _normalize_line_endings(content, "\r\n")
         if has_bom and not _has_bom(content):
             content = _UTF8_BOM + content
-        # ``dirs_created`` means "parent dirs ensured" (mkdir -p is folded into
-        # _atomic_write; its failure surfaces as the atomic-write error below).
-        dirs_created = bool(os.path.dirname(path))
-        # surrogateescape is the exact inverse of the decode that may have produced
-        # this content, so these are the bytes on disk; the early rejection above
-        # guarantees this cannot raise.
+        # ``dirs_created`` comes back from the write itself: True only when that
+        # call had to make the parent directory (mkdir -p rides inside it).
         content_bytes = content.encode("utf-8", "surrogateescape")
-        write_result = self._atomic_write(path, content)
+        write_result, dirs_created = self._atomic_write(path, content)
         if write_result.exit_code != 0:
             return WriteResult(error=f"Failed to write file: {write_result.stdout}")
         content_verified, verify_error = self._verify_written_hash(path, content_bytes)
