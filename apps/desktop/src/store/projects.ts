@@ -2,6 +2,7 @@ import { replaceEqualDeep } from '@tanstack/react-query'
 import { atom, computed } from 'nanostores'
 
 import type { NewSessionPlacement } from '@/app/chat/new-session-drag'
+import { withCreatedProject } from '@/app/chat/sidebar/project-filter'
 import {
   excludeProjectSessions,
   liveSessionProjectId,
@@ -25,7 +26,7 @@ import {
   ensureActiveGatewayOpen,
   isActivePrimary
 } from '@/store/gateway'
-import { $sidebarShowAllSessions, setSidebarAgentsGrouped } from '@/store/layout'
+import { $sidebarProjectFilter, $sidebarShowAllSessions, setSidebarAgentsGrouped } from '@/store/layout'
 import { notify } from '@/store/notifications'
 import {
   $activeGatewayProfile,
@@ -1197,6 +1198,11 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectI
     if (input.dropPlacement && rootPath) {
       $newProjectSessionRequest.set({ path: rootPath, placement: input.dropPlacement })
     }
+
+    // A non-empty project filter is a whitelist, so the project created a moment ago had no lane
+    // (and an unchecked filter row) until it was picked by hand — "New project" looked like it did
+    // nothing (#146495). Joining it is cyclomatic-neutral here; the rule lives in project-filter.
+    $sidebarProjectFilter.set([...withCreatedProject($sidebarProjectFilter.get(), created.id)])
 
     setSidebarAgentsGrouped(true)
   }

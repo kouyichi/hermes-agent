@@ -22,6 +22,20 @@ export function resolveLiveProjectFilter(
 }
 
 /**
+ * Join a just-created project to the persisted filter. A non-empty filter is a whitelist — the
+ * sidebar renders only the picked ids — so a project created while one is active had no lane and
+ * its filter row read unchecked until it was picked by hand (#146495). An empty filter renders
+ * every project: there is nothing to join.
+ */
+export function withCreatedProject(projectFilter: readonly string[], projectId: string): readonly string[] {
+  if (!projectFilter.length || projectFilter.includes(projectId)) {
+    return projectFilter
+  }
+
+  return [...projectFilter, projectId]
+}
+
+/**
  * The sidebar overview is a session history, not a disk browser (#53004): an
  * auto-promoted repo with no sessions yet stays out of the sidebar until work
  * lands there (it reappears the moment it owns a session). Explicit projects

@@ -3,7 +3,7 @@ import { atom } from 'nanostores'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { NO_PROJECT_ID, type SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
-import { $sidebarAgentsGrouped, setSidebarAgentsGrouped } from '@/store/layout'
+import { $sidebarAgentsGrouped, $sidebarProjectFilter, setSidebarAgentsGrouped } from '@/store/layout'
 import { $activeGatewayProfile, $profiles, $profileScope, ALL_PROFILES, setShowAllProfiles } from '@/store/profile'
 import { $currentCwd, $selectedStoredSessionId, $sessions, applyConfiguredDefaultProjectDir } from '@/store/session'
 import { deferred } from '@/test/deferred'
@@ -505,6 +505,7 @@ describe('createProject', () => {
     $projectsRpcAvailable.set(null)
     $projects.set([])
     $projectTree.set([])
+    $sidebarProjectFilter.set([])
     $activeGatewayProfile.set('default')
     $profiles.set([{ is_default: true, name: 'default' } as never, { is_default: false, name: 'work' } as never])
     setShowAllProfiles(false)
@@ -622,6 +623,37 @@ describe('createProject', () => {
     expect(request).toHaveBeenCalledWith('projects.create', expect.objectContaining({ name: 'Demo' }))
     expect($sidebarAgentsGrouped.get()).toBe(true)
     expect($activeProjectId.get()).toBe('p_new')
+  })
+
+  it('adds the project it just created to a narrowing project filter, so the view shows it', async () => {
+    const created = { folders: [], id: 'p_new', name: 'Demo', primary_path: '/srv/demo' }
+
+    activeGateway.mockReturnValue({
+      connectionState: 'open',
+      request: vi.fn().mockResolvedValue({ project: created })
+    } as never)
+    // A narrowing filter: the sidebar renders only the picked ids.
+    $sidebarProjectFilter.set(['p_other'])
+
+    await createProject({ folders: ['/srv/demo'], name: 'Demo' })
+
+    // Without this the new project had no lane and its filter checkbox read unchecked until it
+    // was picked by hand, so "New project" looked like it did nothing (#146495).
+    expect($sidebarProjectFilter.get()).toEqual(['p_other', 'p_new'])
+  })
+
+  it('leaves an empty project filter empty — every project already renders', async () => {
+    const created = { folders: [], id: 'p_new', name: 'Demo', primary_path: '/srv/demo' }
+
+    activeGateway.mockReturnValue({
+      connectionState: 'open',
+      request: vi.fn().mockResolvedValue({ project: created })
+    } as never)
+    $sidebarProjectFilter.set([])
+
+    await createProject({ folders: ['/srv/demo'], name: 'Demo' })
+
+    expect($sidebarProjectFilter.get()).toEqual([])
   })
 
   it('marks the backend stale and surfaces a friendly error when projects.create is missing', async () => {
