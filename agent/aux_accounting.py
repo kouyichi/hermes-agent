@@ -44,7 +44,7 @@ def reset_accounting_context(token) -> None:
 
 def record_aux_usage(
     response: Any, task: Optional[str], *, provider: Optional[str] = None,
-    base_url: Optional[str] = None,
+    base_url: Optional[str] = None, api_key: Optional[str] = None,
 ) -> None:
     """Record an auxiliary response's token usage against the ambient session.
 
@@ -52,6 +52,11 @@ def record_aux_usage(
     agent turn, for main-loop-accounted tasks (``_EXCLUDED_TASKS``), or without usage.
     The model is read from ``response.model`` (accurate after aux provider fallback);
     *provider*/*base_url* reflect the originally-resolved route.
+
+    *api_key* is the credential that authenticated the call. The pricing route resolves an
+    OpenAI-compatible endpoint's rates from its ``/models`` payload, and an endpoint that
+    requires a bearer key answers 401 without it — the row then keeps ``estimated_cost_usd``
+    NULL and every aux call leaves an error in that endpoint's log (#146655).
     """
     try:
         if not task or task in _EXCLUDED_TASKS:
@@ -76,7 +81,7 @@ def record_aux_usage(
         model = str(getattr(response, "model", "") or "") or "unknown"
         estimated_cost = None
         try:
-            cost = estimate_usage_cost(model, usage, provider=provider, base_url=base_url)
+            cost = estimate_usage_cost(model, usage, provider=provider, base_url=base_url, api_key=api_key)
             if cost.amount_usd is not None:
                 estimated_cost = float(cost.amount_usd)
         except Exception:

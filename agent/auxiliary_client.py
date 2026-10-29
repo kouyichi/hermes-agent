@@ -6755,17 +6755,16 @@ def _build_call_kwargs(
 
 def _validate_llm_response(
     response: Any, task: Optional[str] = None, provider: Optional[str] = None, base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Any:
     """Validate the .choices[0].message shape (fail fast, not a downstream AttributeError).
 
     Also the single aux-usage accounting chokepoint: every successful non-streaming response
-    passes here exactly once; *provider*/*base_url* are optional hints. Async callers
-    await this off-loop because accounting may commit through synchronous worker RPC.
-
-    See #7264.
-    Recording is best-effort and never affects validation. *provider*/*base_url* are optional accounting
-    hints — fallback-path calls omit them and the row keeps the model (read from the response itself) with
-    an empty route. See #23270.
+    passes here exactly once; *provider*/*base_url*/*api_key* are optional hints. Async callers
+    await this off-loop because accounting may commit through synchronous worker RPC. See #7264.
+    Recording is best-effort and never affects validation. Fallback-path calls omit the hints and the
+    row keeps the model (read from the response itself) with an empty route; *api_key* is the credential
+    that authenticated the call, which the pricing route's ``/models`` probe requires (#146655).
     """
     if response is None:
         raise RuntimeError(
@@ -6773,7 +6772,7 @@ def _validate_llm_response(
         )
     response = _unwrap_data_envelope(response, task)
     from agent.aux_accounting import record_aux_usage
-    record_aux_usage(response, task, provider=provider, base_url=base_url)
+    record_aux_usage(response, task, provider=provider, base_url=base_url, api_key=api_key)
     # Adapter SimpleNamespace responses are fine — they have .choices[0].message.
     try:
         choices = response.choices
@@ -8163,7 +8162,8 @@ def _call_llm_impl(
         # transient blips before escalating to fallback — a dropped connection shouldn't
         # abandon a healthy provider (matters for pinned MoA advisors).
         try:
-            return _primary(provider=request_provider, base_url=req.base_info)
+            return _primary(provider=request_provider, base_url=req.base_info,
+                            api_key=str(getattr(client, "api_key", "") or "") or req.resolved_api_key)
         except Exception as transient_err:
             if not _should_retry_same_provider(task, transient_err, ""):
                 raise
@@ -8322,7 +8322,7 @@ async def _async_call_llm_impl(
                     create=_acreate),
                 task, **validate_kw)
         try:
-            return await _primary(provider=request_provider, base_url=req.base_info)
+            return await _primary(provider=request_provider, base_url=req.base_info, api_key=str(getattr(client, "api_key", "") or "") or req.resolved_api_key)
         except Exception as transient_err:
             # The async Codex adapter wraps the sync stream via to_thread: same TimeoutError here.
             if not _should_retry_same_provider(task, transient_err, " (async)"):
