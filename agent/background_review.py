@@ -994,6 +994,9 @@ def build_cache_parity_fork(
     # indistinguishable from live turns (#118693).
     review_agent._turn_origin = write_origin
     review_agent._memory_store = agent._memory_store
+    # skip_memory keeps the fork without a manager; the PARENT's is bound for mirroring only, so a
+    # review add/patch/consolidation still reaches on_memory_write (#146448). Nothing else routes.
+    review_agent._memory_write_mirror = getattr(agent, "_memory_manager", None)
     review_agent._memory_enabled = agent._memory_enabled
     review_agent._user_profile_enabled = agent._user_profile_enabled
     review_agent._memory_nudge_interval = review_agent._skill_nudge_interval = 0

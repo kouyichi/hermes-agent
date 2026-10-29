@@ -149,9 +149,11 @@ def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
         store=agent._memory_store,
     )
     # Mirror built-in memory writes to external providers; gating lives in
-    # MemoryManager.notify_memory_tool_write.
-    if agent._memory_manager:
-        agent._memory_manager.notify_memory_tool_write(
+    # MemoryManager.notify_memory_tool_write. A fork built with skip_memory has no manager of its
+    # own and carries the parent's for mirroring only, so its committed writes still notify.
+    manager = agent._memory_manager or getattr(agent, "_memory_write_mirror", None)
+    if manager:
+        manager.notify_memory_tool_write(
             result,
             args,
             build_metadata=lambda: agent._build_memory_write_metadata(
