@@ -143,8 +143,16 @@ export function CanonicalGroupList({ onOpen }: { onOpen: (key: string, origin: C
   const [error, setError] = useState('')
   const [refresh, setRefresh] = useState(0)
   const revision = useValue($canonicalGroupListRevision)
+  const gateway = useValue(host.state.gateway)
   useEffect(() => {
     let cancelled = false
+    if (gateway !== 'open') {
+      // A discovery read needs the socket: running it while this gateway is still starting records a
+      // transient startup error that no later render clears, because the gateway was never a
+      // dependency. Leave any last-known rooms in place and let the open state re-run this below.
+      setError('')
+      return () => { cancelled = true }
+    }
     setRooms([])
     setError('')
     void (async () => {
@@ -162,7 +170,7 @@ export function CanonicalGroupList({ onOpen }: { onOpen: (key: string, origin: C
     })().catch(e => { if (!cancelled) {setError(e instanceof Error ? e.message : String(e))} })
 
     return () => { cancelled = true }
-  }, [connectionId, profile, refresh, revision])
+  }, [connectionId, profile, refresh, revision, gateway])
 
   return <div className="grid gap-1 px-2">
     <Button onClick={() => setRefresh(value => value + 1)} variant="ghost">{labels.refreshGroups}</Button>
