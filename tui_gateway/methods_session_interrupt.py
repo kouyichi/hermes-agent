@@ -113,7 +113,15 @@ def _(rid, params: dict) -> dict:
 
 def _apply_correction(rid, session: dict, verb: str, text: str, accepted_status: str) -> dict:
     """``agent.<verb>(text)``; on acceptance record it on the live turn (mid-turn resume rebuilds the bubble)
-    and purge queued self-copies so post-turn drain cannot re-fire the old prompt."""
+    and purge queued self-copies so post-turn drain cannot re-fire the old prompt.
+
+    A text-only copy of the live prompt is refused the same way the queue path drops it (#84417): an accepted
+    correction answers ``accepted_status``, and a client resend (WS retry, double-submit, replay) must not put
+    the user's own prompt back inside the running turn. It answers that same status so the client keeps the
+    message instead of re-queueing it as a fresh turn — ``rejected`` would run the original text again.
+    """
+    if _ac_is_inflight_self_copy(session, text):
+        return _ok(rid, {"status": accepted_status, "text": text})
     try:
         accepted = getattr(session["agent"], verb)(text)
     except Exception as exc:

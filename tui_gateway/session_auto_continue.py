@@ -144,6 +144,25 @@ def _ac_inflight_original(session: dict) -> str:
     return str(turn.get("user") or "").strip() if isinstance(turn, dict) else ""
 
 
+def _ac_is_inflight_self_copy(session: dict, text: Any, *, turn_author: dict | None = None) -> bool:
+    """True when ``text`` is a text-only copy of the live turn's own original user prompt.
+
+    The queue path drops such a copy (``_enqueue_prompt``, #84417) so a drain cannot re-fire it; the
+    steer/redirect seams are the other half. Left unguarded, any client resend whose text equals the live
+    prompt — a retry after a WS timeout, a double-submit, a replayed pending correction — is injected into the
+    running turn again, giving one acceptance log and one durable row for text that entered the turn N times.
+
+    An authored copy is another sender's message, not a duplicate. A turn retained after a failure
+    (``_fail_inflight_turn`` stamps ``status == "error"``) is a retry the user still wants to reach the agent.
+    """
+    if turn_author or not isinstance(text, str):
+        return False
+    turn = session.get("inflight_turn")
+    if not isinstance(turn, dict) or turn.get("status") == "error":
+        return False
+    return (original := _ac_inflight_original(session)) != "" and text.strip() == original
+
+
 def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[str] | None = None,
                     turn_author: dict | None = None) -> dict | None:
     """Queue a message for the next turn. Text-only arrivals share a slot and merge losslessly (like the
@@ -243,10 +262,18 @@ def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
     threading.Thread(target=interrupt, daemon=True, name=f"busy-interrupt-{sid}").start()
 
 
-def _ac_try_correction(rid, session: dict, agent: Any, method: str, plain_text: str, status: str) -> dict | None:
+def _ac_try_correction(rid, session: dict, agent: Any, method: str, plain_text: str, status: str,
+                       turn_author: dict | None = None) -> dict | None:
     """Apply ``agent.<method>(plain_text)`` (steer/redirect); on acceptance record the correction, scrub stale
     self-duplicates so the live turn's original text is not re-fired after settle, and return the ``status`` reply.
-    None → caller falls through to the queue path."""
+    None → caller falls through to the queue path.
+
+    A text-only copy of the live prompt is refused here as well (#84417): it answers exactly what the queue path
+    answers when it drops the same self-copy, and applies nothing — re-injecting it would put the user's own
+    prompt back into the running turn once per client resend.
+    """
+    if _ac_is_inflight_self_copy(session, plain_text, turn_author=turn_author):
+        return _ok(rid, {"status": "queued"})
     try:
         if not getattr(agent, method)(plain_text):
             return None
@@ -427,7 +454,7 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
             "interrupt": getattr(agent, "_supports_active_turn_redirect", False) is True and hasattr(agent, "redirect")}
         method, status = {"steer": ("steer", "steered"), "interrupt": ("redirect", "redirected")}.get(mode, (None, None))
         if (method and supported[mode]
-                and (resp := _ac_try_correction(rid, session, agent, method, plain_text, status)) is not None):
+                and (resp := _ac_try_correction(rid, session, agent, method, plain_text, status, turn_author)) is not None):
             return resp
     # Queue before asking the live turn to stop. Never call a provider/compute-host method under history_lock: an
     # interrupt can wait behind the op it cancels.
@@ -449,7 +476,9 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     # ``AIAgent._pending_steer``) and fall-through queue envelopes (payload not steerable, ``steer()``
     # rejected/raised). A hard interrupt here kills the live turn AND ``AIAgent.interrupt()`` drops the
     # pending steer buffer — silently destroying the earlier messages of the burst. See #86134.
-    if mode == "interrupt" and not image_paths:
+    # A prompt the queue just dropped as a self-copy of the live turn (``envelope is None``, #84417) is not a
+    # reason to stop that turn either: nothing was queued, and killing it is the worst reading of a resend.
+    if mode == "interrupt" and not image_paths and envelope is not None:
         _interrupt_busy_session(sid, session, agent)
     return _ok(rid, {"status": "queued"})
 
