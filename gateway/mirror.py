@@ -36,6 +36,7 @@ def _origin_user_id(entry: dict) -> str:
 def mirror_to_session(
     platform: str, chat_id: str, message_text: str, source_label: str = "cli", thread_id: Optional[str] = None,
     user_id: Optional[str] = None, role: str = "assistant", session_id: Optional[str] = None,
+    display_kind: Optional[str] = None,
 ) -> bool:
     """Append a delivery-mirror message to the target session's SQLite transcript.
 
@@ -51,6 +52,10 @@ def mirror_to_session(
 
     ``role`` defaults to ``"assistant"`` — correct for the interactive ``send_message`` mirror, where the
     mirrored text is the agent's own outgoing reply (a genuine assistant turn). See #2221.
+
+    ``display_kind`` types the persisted row for consumers that must tell a machine-injected turn from
+    something the user typed (``messages.display_kind``, display-only and stripped before every provider
+    request). Left unset, the row keeps the column's NULL, which is what an untyped row means today.
     """
     try:
         if not session_id:
@@ -61,10 +66,13 @@ def mirror_to_session(
                 platform, chat_id, thread_id, user_id,
             )
             return False
-        _append_to_sqlite(session_id, {
+        row = {
             "role": role, "content": message_text, "timestamp": datetime.now().isoformat(),
             "mirror": True, "mirror_source": source_label,
-        })
+        }
+        if display_kind:
+            row["display_kind"] = display_kind
+        _append_to_sqlite(session_id, row)
         logger.debug("Mirror: wrote to session %s (from %s)", session_id, source_label)
         return True
     except Exception as e:
@@ -136,6 +144,9 @@ def _append_to_sqlite(session_id: str, message: dict) -> None:
 
     db = acquire()
     try:
-        db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
+        db.append_message(
+            session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"),
+            display_kind=message.get("display_kind"),
+        )
     finally:
         release_or_close(db)

@@ -78,6 +78,12 @@ _PROMPT_FRAME_RE = re.compile(
 _RESPONSE_FRAME_RE = re.compile(
     rf"(?m)^{re.escape(_RESPONSE_FRAME)}(\d+)\n{re.escape(_RESPONSE_HEADING)}")
 
+# ``messages.display_kind`` for the user row a cron turn is persisted as. The prompt is machine
+# scaffolding (``[IMPORTANT: You are running as a scheduled cron job. ...]``), not something the
+# user typed, and the column already exists and is display-only: filling it lets consumers filter
+# cron turns structurally instead of by matching that prefix, which changes without notice (#146134).
+CRON_PROMPT_DISPLAY_KIND = "cron_prompt"
+
 
 def _job_doc_header(job_name: str, job_id: str, now_iso: str, mode: str) -> str:
     """Common markdown header for the short-circuit run docs (no_agent / monitor)."""

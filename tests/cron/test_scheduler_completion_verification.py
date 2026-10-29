@@ -27,7 +27,7 @@ class _FakeCronAgent:
     def __init__(self, *args, **kwargs):
         pass
 
-    def run_conversation(self, prompt, *, task_id):
+    def run_conversation(self, prompt, *, task_id, persist_user_display_kind=None):
         return {
             "completed": True,
             "failed": False,

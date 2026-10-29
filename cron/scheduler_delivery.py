@@ -216,7 +216,8 @@ def _maybe_mirror_cron_delivery(
         # SQLite mirror metadata would otherwise lose on replay.
         ok = mirror_to_session(
             platform_name, str(chat_id), _cron_mirror_message(job, text),
-            source_label="cron", thread_id=thread_id, user_id=user_id, role="user")
+            source_label="cron", thread_id=thread_id, user_id=user_id, role="user",
+            display_kind=_sched.CRON_PROMPT_DISPLAY_KIND)
         if ok:
             logger.info(
                 "Job '%s': mirrored delivery into %s:%s session transcript",
