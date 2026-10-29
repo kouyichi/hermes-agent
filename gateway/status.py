@@ -26,6 +26,7 @@ from gateway.status_inline_source import (
     command_line_runs_inline_source,
     inline_bootstrap_argv,
     inline_source_flag_index,
+    runs_dedicated_gateway_entrypoint,
 )
 from hermes_constants import _get_platform_default_hermes_home, get_hermes_home, get_process_hermes_home
 from hermes_cli._subprocess_compat import pid_exists_stdlib
@@ -579,13 +580,12 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
         return "run"
     if any(tokens[i] == "-m" and tokens[i + 1] == "gateway.run" for i in range(len(tokens) - 1)):
         return "run"
-    # Atomic Hermes' bundled desktop runner shares HERMES_HOME with the CLI; without this,
-    # `gateway run --replace` does not recognise it as a running gateway, skips the
-    # terminate-and-scoped-lock-handoff path, and collides with its still-held scoped locks
-    # (e.g. the Discord bot-token lock). See #22418.
+    # Atomic Hermes' bundled desktop runner shares HERMES_HOME with the CLI; without this, `gateway run
+    # --replace` skips the terminate-and-scoped-lock-handoff path and collides with its still-held
+    # scoped locks (e.g. the Discord bot-token lock). See #22418.
     if any(b == "desktop-gateway.py" for b in basenames):
         return "run"
-    if any(b in ("hermes-gateway", "hermes-gateway.exe") for b in basenames):
+    if runs_dedicated_gateway_entrypoint(cased_tokens):
         return "run"
     joined = " ".join(tokens)
     if "hermes_cli.main" not in joined and "hermes_cli/main.py" not in joined and not any(

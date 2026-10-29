@@ -1,4 +1,5 @@
-"""Inline-source (``python -c <src> …``) command-line parsing for gateway process identity.
+"""Command-line parsing for gateway process identity: inline source, and where an entrypoint has to
+sit for a command line to BE a gateway runtime rather than merely name one.
 
 Everything after ``-c`` is data for the inline program, not the process's own identity -- except
 Hermes' own bootstraps, which run an entry point in-process and are mapped back to the equivalent
@@ -67,6 +68,40 @@ def inline_source_flag_index(tokens: list[str]) -> int | None:
 def command_line_runs_inline_source(tokens: list[str]) -> bool:
     """True when *tokens* is an interpreter running INLINE SOURCE (``python -c <src> [args]``)."""
     return inline_source_flag_index(tokens) is not None
+
+
+_DEDICATED_GATEWAY_ENTRYPOINTS = frozenset({"hermes-gateway", "hermes-gateway.exe"})
+
+
+def _names_dedicated_entrypoint(command: str) -> bool:
+    """True when *command* names the gateway-dedicated entrypoint (path-, case- and ``.exe``-insensitive)."""
+    return command.replace("\\", "/").rsplit("/", 1)[-1].lower() in _DEDICATED_GATEWAY_ENTRYPOINTS
+
+
+def runs_dedicated_gateway_entrypoint(tokens: list[str]) -> bool:
+    """True when this command line EXECUTES the ``hermes-gateway`` entrypoint, not merely names it.
+
+    The dedicated entrypoint carries no subcommand to inspect, so it counts only in executable
+    position: ``argv[0]`` itself, or the script operand a Python interpreter was handed (the repo's
+    ``scripts/hermes-gateway`` shim is executed through its ``#!/usr/bin/env python3`` shebang, so the
+    OS-reported argv[0] is the interpreter; a service definition may also spell the shim as
+    ``python3 -X utf8 /opt/hermes/bin/hermes-gateway``). Any later token is an ARGUMENT, and reading
+    it as identity made ``hermes update``'s drain ACK ``journalctl --user -u hermes-gateway -f`` and
+    then wait out its whole restart budget on a process that never exits (#146044).
+
+    *tokens* must be CASE-PRESERVING, for the same reason as ``inline_source_flag_index``: the
+    operand-taking ``-Q``/``-W``/``-X`` are not the operand-less ``-q``/``-w``/``-x``.
+    """
+    if not tokens:
+        return False
+    if _names_dedicated_entrypoint(tokens[0]):
+        return True
+    from hermes_state_holders import _looks_like_python_executable, _python_execution_target
+
+    if not _looks_like_python_executable(tokens[0]):
+        return False
+    target = _python_execution_target(tokens)
+    return target is not None and target[0] == "script" and _names_dedicated_entrypoint(target[1])
 
 
 # Hermes' own inline bootstraps hand control to a Hermes entry point IN this process, so the argv

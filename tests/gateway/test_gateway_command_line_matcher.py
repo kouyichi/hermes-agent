@@ -103,6 +103,45 @@ def test_accepts_gateway_behind_operand_taking_interpreter_options(cmd):
     assert matches(cmd) is True
 
 
+# The dedicated ``hermes-gateway`` entrypoint carries no subcommand, so the only thing that makes a
+# command line a gateway is EXECUTING it: argv[0] itself, or the script operand a Python interpreter
+# was handed (the repo's ``scripts/hermes-gateway`` shim runs through its ``#!/usr/bin/env python3``
+# shebang, and a Windows/service launcher can hand the shim to the interpreter by path). A later
+# token that merely names the unit is an argument, not this process's identity: ``hermes update``'s
+# drain ACKed ``journalctl --user -u hermes-gateway -f`` as a live gateway and then waited out its
+# whole restart budget, ~34 minutes, on a process that never exits (#146044).
+ENTRYPOINT_BYSTANDER_REJECT = [
+    "journalctl --user -u hermes-dashboard -u hermes-gateway -f -n 0 --no-pager -o short-iso",
+    "journalctl -u hermes-gateway -f",
+    "systemctl --user status hermes-gateway",
+    "systemctl --user restart hermes-gateway",
+    "less /home/me/.hermes/logs/hermes-gateway",
+    "grep -c ERROR /home/me/.hermes/logs/hermes-gateway.log",
+]
+
+ENTRYPOINT_EXECUTABLE_ACCEPT = [
+    "/home/me/.hermes/bin/hermes-gateway run",
+    "/home/me/.hermes/bin/hermes-gateway",
+    r'"C:\Program Files\Hermes\hermes-gateway.exe" run',
+    "python3 /home/me/Work/hermes/scripts/hermes-gateway run",
+    "python3 /home/me/Work/hermes/scripts/hermes-gateway",
+    "python3 -X utf8 /opt/hermes/bin/hermes-gateway run",
+    "python3 -I -S -B -X utf8 /opt/hermes/bin/hermes-gateway",
+]
+
+
+@pytest.mark.parametrize("cmd", ENTRYPOINT_BYSTANDER_REJECT)
+def test_rejects_bystanders_that_only_name_the_entrypoint(cmd):
+    assert matches(cmd) is False
+    assert matches_runtime(cmd) is False
+    assert spawn_intent(cmd) is None
+
+
+@pytest.mark.parametrize("cmd", ENTRYPOINT_EXECUTABLE_ACCEPT)
+def test_accepts_the_entrypoint_in_executable_position(cmd):
+    assert matches(cmd) is True
+
+
 # The repo's own non-gateway ``-X utf8`` spawn shapes must stay unmatched.
 @pytest.mark.parametrize(
     "cmd",
