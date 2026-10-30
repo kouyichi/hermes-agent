@@ -1,6 +1,9 @@
 """Tests for check_all_command_guards() — the combined floor + dangerous-command guard."""
 
 import os
+import sys
+import tempfile
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -9,6 +12,26 @@ import tools.approval as approval_module
 from tools import approval_context
 from tools.approval import approve_session, check_all_command_guards, detect_dangerous_command
 from tools.approval_context import set_current_session_key, reset_current_session_key
+
+
+def _runtime_roots() -> list[str]:
+    """Roots a throwaway test interpreter is installed under in practice: the scratch directory (the
+    classic ``uv venv /tmp/...`` test env), the checkout, and the home directory."""
+    roots = [tempfile.gettempdir(), str(Path.cwd()), str(Path.home())]
+    if os.name == "posix":
+        roots.insert(0, "/tmp")
+    return list(dict.fromkeys(roots))
+
+
+def _dangerous_fixture_command(tmp_path: Path) -> str:
+    """The recursive delete these tests prompt for.
+
+    It must never be the runtime's own venv or an ancestor of it: ``rm -rf /tmp`` tripped the
+    unconditional runtime self-delete hardline whenever pytest ran from a venv under the scratch root,
+    so the test's verdict was a function of the interpreter's location instead of the guard under test
+    (#146827). A ``tmp_path``-derived target belongs to the test and cannot contain the interpreter.
+    """
+    return f"rm -rf {tmp_path / 'guard-fixture'}"
 
 
 @pytest.fixture(autouse=True)
@@ -75,13 +98,31 @@ class TestCliPrompt:
         assert result["approved"] is True
         cb.assert_not_called()
 
-    def test_dangerous_command_deny(self):
+    def test_dangerous_command_deny(self, tmp_path):
         os.environ["HERMES_INTERACTIVE"] = "1"
         cb = MagicMock(return_value="deny")
-        result = check_all_command_guards("rm -rf /tmp", "local", approval_callback=cb)
+        result = check_all_command_guards(_dangerous_fixture_command(tmp_path), "local", approval_callback=cb)
         assert result["approved"] is False
         cb.assert_called_once()
         assert cb.call_args[1]["allow_permanent"] is True
+
+    @pytest.mark.parametrize("runtime_root", _runtime_roots())
+    def test_dangerous_command_prompts_from_any_interpreter_location(self, runtime_root, tmp_path, monkeypatch):
+        """#146827: the fixture command reaches the prompt wherever the test interpreter lives.
+
+        A runtime self-delete hardline answers before the approval callback, so a fixture command that
+        contains the interpreter's venv turns the deny assertion above into "the callback was never
+        called" — a failure of the harness, not of the guard.
+        """
+        runtime_venv = Path(runtime_root) / "hermes-guard-runtime"
+        monkeypatch.setattr(sys, "executable", str(runtime_venv / "bin" / "python3"))
+        monkeypatch.setattr(sys, "prefix", str(runtime_venv))
+        os.environ["HERMES_INTERACTIVE"] = "1"
+        cb = MagicMock(return_value="deny")
+        result = check_all_command_guards(_dangerous_fixture_command(tmp_path), "local", approval_callback=cb)
+        assert result.get("hardline") is None, f"the runtime self-delete floor swallowed the prompt: {result}"
+        assert result["approved"] is False
+        cb.assert_called_once()
 
     def test_session_approval_skips_the_next_prompt(self):
         os.environ["HERMES_INTERACTIVE"] = "1"
