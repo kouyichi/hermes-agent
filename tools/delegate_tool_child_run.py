@@ -3,6 +3,8 @@ timeout/failure handling, result-entry assembly and cleanup (``_ChildRun``)."""
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
 import contextvars
 import json
@@ -699,20 +701,61 @@ def _is_image_url(ref: str) -> bool:
     return ref.startswith(("http://", "https://", "data:image/"))
 
 
-def _build_child_goal_message(goal: str, images: list[str], child) -> Any:
+def _read_backend_images(paths: list[str], task_id: Optional[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """``[(data_url, path)]`` for image paths that only the terminal backend can see, plus the ones it cannot.
+
+    ``_build_child_goal_message`` reads paths off the HOST, so with a Docker (or any non-local) terminal
+    backend a sandbox path that ``vision_analyze`` opens fine was dropped as unreadable — silently, from the
+    caller's side (#146982). Read those through the same shared media resolver the vision tools use, which
+    keeps the in-sandbox read bounded and the credential/block guards in force; the host path stays the
+    hint so the child can still re-open it through its own backend. Never raises: a resolver failure leaves
+    the path to the caller's existing skip path.
+    """
+    if not paths:
+        return [], []
+    try:
+        from tools.image_source import ResolveContext, _is_local_terminal_backend, resolve_image_source
+        if _is_local_terminal_backend():
+            # Host-visible by contract here: a miss is a missing file, not a backend-only path.
+            return [], []
+    except Exception:
+        logger.debug("delegate_task: terminal-backend image resolver unavailable", exc_info=True)
+        return [], []
+    resolved: list[tuple[str, str]] = []
+    unreadable: list[str] = []
+    for path in paths:
+        try:
+            image = asyncio.run(resolve_image_source(path, ResolveContext(task_id=task_id), permitted=("image",)))
+        except Exception as exc:  # health: allow BLE001 -- any resolver failure must degrade to the skip path
+            logger.warning("delegate_task: could not read %s through the terminal backend: %s", path, exc)
+            unreadable.append(path)
+            continue
+        resolved.append((f"data:{image.mime};base64,{base64.b64encode(image.data).decode('ascii')}", path))
+    return resolved, unreadable
+
+
+def _build_child_goal_message(
+    goal: str, images: list[str], child, *, backend_images: Optional[list[tuple[str, str]]] = None,
+) -> Any:
     """The child's first user message when a task forwards ``images``.
 
     Routing reuses the inbound-image policy (``agent.image_routing``, honouring ``agent.image_input_mode``): a
     vision-capable child gets an OpenAI-style content list (text part + one ``image_url`` part per image; local files
     as data URLs behind the read guard, http(s)/data URLs verbatim); otherwise the goal gains ``[Image attached …]``
-    hint lines for ``vision_analyze``. Any failure degrades to the text-only goal so image plumbing never breaks a
-    spawn — logged at warning since the caller asked for the images.
+    hint lines for ``vision_analyze``. ``backend_images`` carries paths already read through a non-local terminal
+    backend (see ``_read_backend_images``): they attach natively and hint under their original path. Any failure
+    degrades to the text-only goal so image plumbing never breaks a spawn — logged at warning since the caller asked
+    for the images.
     """
     try:
         # data: URLs ride as image parts only — their base64 never goes into the text hint or a text-mode goal.
         data_urls = [s for s in images if s.startswith("data:image/")]
         urls = [s for s in images if _is_image_url(s) and s not in data_urls]
         paths = [s for s in images if not _is_image_url(s)]
+        # Backend-read paths attach (native) or hint (text) on their own; leaving them in ``paths`` would
+        # re-report them as unreadable host files.
+        backend_paths = [raw for _, raw in backend_images or ()]
+        remaining = [s for s in paths if s not in backend_paths]
         from agent.image_routing import build_native_content_parts, decide_image_input_mode
         cfg = None
         with _quiet(None):
@@ -723,7 +766,7 @@ def _build_child_goal_message(goal: str, images: list[str], child) -> Any:
             requested_provider=str(getattr(child, "requested_provider", "") or ""),
         )
         if mode == "native":
-            parts, skipped = build_native_content_parts(goal, paths, urls)
+            parts, skipped = build_native_content_parts(goal, remaining, urls, backend_images=backend_images)
             if skipped:
                 logger.warning("delegate_task: skipped %d unreadable image(s) for subagent: %s", len(skipped), ", ".join(skipped[:3]))
             if data_urls:
@@ -733,7 +776,7 @@ def _build_child_goal_message(goal: str, images: list[str], child) -> Any:
             logger.warning("delegate_task: %d inline data-URL image(s) dropped for a non-vision subagent", len(data_urls))
         hints: list[str] = []
         for p in paths:
-            if os.path.isfile(p):
+            if os.path.isfile(p) or p in backend_paths:
                 hints.append(f"[Image attached at: {p}]")
             else:
                 logger.warning("delegate_task: image path not found, not forwarded: %s", p)
@@ -902,7 +945,21 @@ class _ChildRun:
         worker_thread_holder: dict[str, Optional[threading.Thread]] = {"t": None}
         # Resolved after seed_workspace so a multimodal goal's text part carries the worktree note too.
         _images = list(getattr(child, "_delegate_images", None) or [])
-        user_message: Any = _build_child_goal_message(self.goal, _images, child) if _images else self.goal
+        # A Docker/sandbox path is not a host file: read it through the terminal backend before routing, or the
+        # attachment is dropped as unreadable and the caller sees only a log line (#146982).
+        _backend_images, _unreadable = _read_backend_images(
+            [p for p in _images if not _is_image_url(p) and not os.path.isfile(p)],
+            self.parent_task_id or self.child_task_id,
+        )
+        if _unreadable:
+            logger.warning(
+                "delegate_task: %d image(s) unreadable through the terminal backend and not forwarded: %s",
+                len(_unreadable), ", ".join(_unreadable[:3]),
+            )
+        user_message: Any = (
+            _build_child_goal_message(self.goal, _images, child, backend_images=_backend_images)
+            if _images else self.goal
+        )
 
         def _run_with_thread_capture():
             worker_thread_holder["t"] = threading.current_thread()

@@ -534,6 +534,7 @@ def build_native_content_parts(
     user_text: str,
     image_paths: list[str],
     image_urls: Optional[list[str]] = None,
+    backend_images: Optional[list[tuple[str, str]]] = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Build an OpenAI-style ``content`` list for a user turn.
 
@@ -543,9 +544,17 @@ def build_native_content_parts(
     hint per image — a string handle for tools taking an image path/URL, mirroring
     ``Runner._enrich_message_with_vision``. Returns ``(content_parts, skipped)``;
     ``skipped`` holds unreadable local paths (URLs are never skipped).
+
+    ``backend_images`` takes ``(data_url, path)`` pairs whose bytes a caller already read through a
+    non-local terminal backend, where ``path`` is deliberately NOT host-readable: they attach like a
+    local file, and their hint names the original ``path`` (the reader that produced the URL can still
+    open it, e.g. a subagent's ``vision_analyze`` against the same sandbox).
     """
     skipped: list[str] = []
     attached: list[tuple[str, str]] = []  # (url, hint)
+    for data_url, raw_path in backend_images or ():
+        if data_url:
+            attached.append((data_url, f"[Image attached at: {raw_path}]"))
     for raw_path in image_paths:
         p = Path(raw_path)
         data_url = _file_to_data_url(p) if p.exists() and p.is_file() else None
