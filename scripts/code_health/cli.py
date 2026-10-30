@@ -86,10 +86,34 @@ def _skipped(why: str, as_json: bool) -> None:
     print(why, file=sys.stderr if as_json else sys.stdout)
 
 
+def _nothing_measured(repo: Path, base: str, head: str | None, head_commit: str | None,
+                      as_json: bool) -> int:
+    """No measured path between base and head. Two different commits with nothing measured is a
+    legitimate pass (a docs-only commit must keep passing the pre-commit hook, which judges a
+    commit against its own merge-base). The SAME commit on both sides is a degenerate base — a
+    shallow clone and a worktree on main both derive HEAD as the base, and `--base HEAD` asks for
+    it outright — so nothing was measured and a verdict would be a false pass (#146612).
+    """
+    effective = head_commit or (gitio.commit_or_none(repo, head) if head
+                               else gitio.commit_or_none(repo, "HEAD"))
+    if effective is None or effective != base:
+        _skipped("code health: no measured files changed", as_json)
+        return 0
+    _skipped(
+        f"code health: nothing measured: base and head are the same commit ({base[:12]}), so "
+        "there is no diff to judge. Pass --base <a different revision>.",
+        as_json,
+    )
+    return 2
+
+
 def run(repo: Path, base: str, head: str | None, as_json: bool = False,
-        switch_rev: str | None = None) -> int:
+        switch_rev: str | None = None, head_commit: str | None = None) -> int:
     """Judge ``head`` against ``base``; the ENFORCEMENT switch is read from ``switch_rev``
-    (default: the base), never from the head under test."""
+    (default: the base), never from the head under test.
+
+    ``head_commit`` is the commit the head side resolves to when the caller already knows it (the
+    working tree is ``HEAD``; a ``--staged`` tree id is not a commit and resolves to None)."""
     started = time.monotonic()
     switch_rev = switch_rev or base
     mode = enforcement(repo, switch_rev)
@@ -100,8 +124,7 @@ def run(repo: Path, base: str, head: str | None, as_json: bool = False,
     head_paths = sorted({c.new for c in changes if c.new and in_scope(c.new)})
     base_paths = sorted({c.old for c in changes if c.old and in_scope(c.old)})
     if not head_paths:
-        _skipped("code health: no measured files changed", as_json)
-        return 0
+        return _nothing_measured(repo, base, head, head_commit, as_json)
     # Base files are measured too: a deleted .py still needs ruff on the base side.
     needs_ruff = any(p.endswith(".py") for p in (*head_paths, *base_paths))
     ruff = resolve_ruff(repo) if needs_ruff else []
@@ -136,16 +159,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         head = gitio.resolve_tree(repo, args.head) if args.head else None
+        # The commit the head side is: the working tree is HEAD, `--head <rev>` is that commit, and
+        # a `--staged` tree id is not a commit at all (None), so the ratchet cannot call it degenerate.
+        head_commit = gitio.commit_or_none(repo, args.head or "HEAD")
         if args.report:
             return _report(repo, head)
         if args.base:  # CI: the base is the target branch tip, which also holds the switch
-            return run(repo, gitio.resolve_rev(repo, args.base), head, as_json=args.json)
+            return run(repo, gitio.resolve_rev(repo, args.base), head, as_json=args.json,
+                       head_commit=head_commit)
         # Locally the base is the merge-base, which lags main; the switch comes from the main tip
         # so a flip on main reaches a branch without a rebase. The head never supplies it.
         tip = gitio.commit_or_none(repo, args.head) if args.head else None
         base = gitio.default_base(repo, tip or "HEAD")
         switch_rev = gitio.commit_or_none(repo, "origin/main") or base
-        return run(repo, base, head, as_json=args.json, switch_rev=switch_rev)
+        return run(repo, base, head, as_json=args.json, switch_rev=switch_rev,
+                   head_commit=head_commit)
     except RuntimeError as exc:
         print(f"code health: {exc}", file=sys.stderr)
         return 2
