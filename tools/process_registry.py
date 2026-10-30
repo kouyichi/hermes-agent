@@ -2015,7 +2015,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         return result
 
     def read_log(self, session_id: str, offset: int | None = None, limit: int = 200) -> dict:
-        """Read the full output log with optional pagination by lines."""
+        """Read the full output log, optionally paged by lines; a negative offset counts from the end."""
         from tools.ansi_strip import strip_ansi
 
         session = self.get(session_id)
@@ -2034,9 +2034,9 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             observed_completion_output = bool(selected) or total_lines == 0
         else:
             offset = offset or 0
-            selected = lines[offset:offset + limit]
-            stop = slice(offset, offset + limit).indices(total_lines)[1]
-            observed_completion_output = total_lines == 0 or (bool(selected) and stop == total_lines)
+            start = max(total_lines + offset, 0) if offset < 0 else offset
+            selected = lines[start:start + limit]
+            observed_completion_output = total_lines == 0 or (bool(selected) and start + len(selected) == total_lines)
         result = {
             **self._status_head(session), "output": "\n".join(selected),
             "total_lines": total_lines, "showing": f"{len(selected)} lines"}
@@ -2605,7 +2605,7 @@ PROCESS_SCHEMA = {
             },
             "offset": {
                 "type": "integer",
-                "description": "Log line offset (default: last 200)."
+                "description": "Log line offset (default: last 200; negative counts from the end)."
             },
             "limit": {
                 "type": "integer",
