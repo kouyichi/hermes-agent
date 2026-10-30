@@ -402,6 +402,11 @@ _S6_INIT_ENTRYPOINTS = ("/init", "/package/admin/s6-overlay/command/init")
 
 _NO_NEW_PRIVILEGES_ARGS = ["--security-opt", "no-new-privileges"]
 
+# A container whose entrypoint the host's LSM stack refuses exits immediately, so ``docker exec``
+# answers "container … is not running" for every command afterwards and the real cause never
+# reaches the operator (#146746). The entrypoint's own log line is the signature that names it.
+_EXEC_REFUSAL_SIGNATURE = "operation not permitted"
+
 
 def _build_security_args(run_as_host_user: bool, run_exec: bool = False, snap_compat: bool = False) -> list[str]:
     """Security/cap/tmpfs args for the privilege mode; ``run_exec`` mounts /run exec for s6 images.
@@ -1135,6 +1140,44 @@ class DockerEnvironment(BaseEnvironment):
     def _is_container_gone(self, output: str) -> bool:
         return any(p in output for p in self._NO_CONTAINER_PATTERNS)
 
+    def _container_exit_diagnosis(self) -> Optional[str]:
+        """Why this sandbox refuses ``docker exec``, for a container that is no longer running.
+
+        ``docker exec`` answers "container … is not running" for any container whose PID 1 has
+        exited, so the daemon reply names the symptom and drops the cause: on a host whose LSM
+        stack refuses ``--security-opt no-new-privileges`` the entrypoint cannot exec at all and
+        every command in the sandbox fails with that one line (#146746). Read the state and the
+        log tail so the tool result carries the exit code and the entrypoint's own error, plus the
+        remedy for that family. Best-effort — a failed probe returns ``None`` and the daemon's own
+        message stands unchanged. A running container also returns ``None``: the exec failure is
+        then something other than a dead entrypoint, and the caller's original error says more.
+        """
+        if not self._container_id:
+            return None
+        short = self._container_id[:12]
+        try:
+            state = run_capture([self._docker_exe, "inspect", "--format",
+                                 "{{.State.Running}} {{.State.ExitCode}}", self._container_id], timeout=15)
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.debug("Sandbox exit diagnosis: docker inspect failed for %s: %s", short, e)
+            return None
+        running, _, exit_code = (state.stdout or "").strip().partition(" ")
+        if state.returncode != 0 or running == "true":
+            return None
+        cause = ""
+        try:
+            log = run_capture([self._docker_exe, "logs", "--tail", "20", self._container_id], timeout=15)
+            cause = " | ".join(line.strip() for line in (log.stdout or "").splitlines() if line.strip())
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.debug("Sandbox exit diagnosis: docker logs failed for %s: %s", short, e)
+        detail = f"docker sandbox container exited (exit code {exit_code or 'unknown'})"
+        if cause:
+            detail += f": {cause}"
+        if _EXEC_REFUSAL_SIGNATURE in cause and _NO_NEW_PRIVILEGES_ARGS[1] in " ".join(self._all_run_args):
+            detail += (" — this host refuses --security-opt no-new-privileges, so nothing in the"
+                       " sandbox can exec; set terminal.docker_snap_compat: true to start it without it")
+        return detail
+
     def _recreate_container(self) -> bool:
         """Recreate a container removed out-of-band: label-based reuse first (another process
         may have recreated it), else a fresh one from the saved image/run-args. False when
@@ -1185,7 +1228,9 @@ class DockerEnvironment(BaseEnvironment):
 
     def execute(self, command: str, cwd: str = "", **kwargs) -> dict:
         """Execute a command; if the container was removed out-of-band (idle reaper,
-        docker prune, OOM, daemon restart) recreate it and retry once."""
+        docker prune, OOM, daemon restart) recreate it and retry once. A container that is still
+        unreachable afterwards carries ``_container_exit_diagnosis()`` next to the daemon's own
+        message — "is not running" alone hides an entrypoint the host refused to exec (#146746)."""
         result = super().execute(command, cwd, **kwargs)
         if (
             result.get("returncode", 0) != 0
@@ -1193,6 +1238,9 @@ class DockerEnvironment(BaseEnvironment):
             and self._persist_across_processes
             and self._recreate_container()):
             result = super().execute(command, cwd, **kwargs)
+        if result.get("returncode", 0) != 0 and self._is_container_gone(result.get("output", "")):
+            if detail := self._container_exit_diagnosis():
+                result["output"] = f"{result.get('output', '')}\n{detail}"
         return result
 
     @staticmethod
