@@ -211,6 +211,13 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
             config[key] = value
         else:
             config.pop(key, None)
+    # The nested route is the FIRST thing resume reads (``SessionDB.session_gateway_runtime``, shared
+    # with CLI ``--resume``), so it has to move with the top-level keys: a row that kept the route of
+    # the provider this switch left resumed on that provider (#146345). Same or-None shape that
+    # ``update_session_model`` and the CLI switch write; a row without a nested route keeps none.
+    if provider and "gateway_runtime" in config:
+        config["gateway_runtime"] = {"provider": provider, "base_url": base_url or None,
+                                     "api_mode": live["api_mode"] or None}
     return config
 
 
