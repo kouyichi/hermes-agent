@@ -332,6 +332,10 @@ class SessionCompressionMixin:
         # Pin/archive and the conversation keys are compression-lineage state; canonical branch/reset
         # verbs also publish through here, and their child is its own conversation.
         continuation = not any(k in (model_config or {}) for k in ("_branched_from", "_reset_from"))
+        # Only a BRANCH copies the parent's transcript, so only its recency has to start at its own
+        # creation (last_active is the freshest message, #146712). A reset child starts empty, and a
+        # continuation IS the parent's conversation; both keep deriving recency the ordinary way.
+        branched = "_branched_from" in (model_config or {})
         carried = {key: value for key, value in _parse_model_config(parent["model_config"]).items()
                    if continuation and key in _CONVERSATION_MODEL_CONFIG_KEYS}
         model_config = {**carried, **(model_config or {})}
@@ -353,8 +357,8 @@ class SessionCompressionMixin:
                    parent_session_id, cwd, git_branch, git_repo_root,
                    profile_name, user_id, session_key, chat_id, chat_type,
                    thread_id, display_name, origin_json, pinned, started_at,
-                   archived, auto_archived
-                ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   archived, auto_archived, last_activity_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 child_session_id, source, created_source, model, json.dumps(model_config) if model_config else None,
                 system_prompt_hash, parent["tool_names"], parent_session_id, cwd or parent["cwd"], parent["git_branch"],
@@ -367,7 +371,10 @@ class SessionCompressionMixin:
                 # Inherit the lineage's archive state so a manually archived chat stays uniformly
                 # archived (a mixed lineage let the sweep re-stamp its fresh tip as auto-archived).
                 (parent["archived"] or 0) if continuation else 0,
-                (parent["auto_archived"] or 0) if continuation else 0),
+                (parent["auto_archived"] or 0) if continuation else 0,
+                # A branch child copies history at the PARENT's timestamps, so its own creation is its
+                # first activity; a continuation keeps the parent's recency (same conversation, #146712).
+                time.time() if branched else None),
         )
 
     def publish_compression_child(

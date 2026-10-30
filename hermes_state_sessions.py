@@ -412,6 +412,12 @@ class SessionSessionsMixin:
                       transport_profile=transport_profile)
         self._execute_write(lambda conn: insert_session_row_in_transaction(self, conn, **params),
                             patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
+        if model_config and model_config.get("_branched_from"):
+            # A branch child's transcript is copied at the PARENT's timestamps, so its own creation is the
+            # first activity it has: without the stamp, last_active (the freshest message) files a fork made
+            # today among the sessions of the day its parent last spoke (#146712).
+            self._write_sql("UPDATE sessions SET last_activity_at = COALESCE(last_activity_at, started_at) "
+                            "WHERE id = ?", (session_id,))
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
         """Create (upsert) a session record. Returns the session_id."""
