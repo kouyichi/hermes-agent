@@ -84,18 +84,28 @@ def _utc_now_iso() -> str:
     return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
 
 
+def _payload_cwd() -> str:
+    """The session's workspace when a turn is bound, else this process's directory.
+
+    A gateway never chdir-es, so ``Path.cwd()`` there is the install root shared by every session;
+    ``session_cwd()`` reads the workspace ``policy_scope`` binds for the turn (and is empty in a bare
+    CLI process, which keeps its launch directory).
+    """
+    from hermes_cli.plugin_session import session_cwd
+    try:
+        return session_cwd() or str(Path.cwd())
+    except OSError:
+        return ""
+
+
 def _payload_fields(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Common stdin/POST payload fields (shared with outbound webhooks); key order is wire order."""
-    try:
-        cwd = str(Path.cwd())
-    except OSError:
-        cwd = ""
     from hermes_cli.profiles import get_active_profile_name
     return {
         "tool_name": kwargs.get("tool_name"),
         "tool_input": kwargs.get("args") if isinstance(kwargs.get("args"), dict) else None,
         "session_id": kwargs.get("session_id") or kwargs.get("parent_session_id") or "",
-        "cwd": cwd,
+        "cwd": _payload_cwd(),
         # Resolved at fire time: a multiplexed gateway's hook script must know which profile fired it.
         "profile": get_active_profile_name(),
         "extra": {k: v for k, v in kwargs.items() if k not in _TOP_LEVEL_PAYLOAD_KEYS},
