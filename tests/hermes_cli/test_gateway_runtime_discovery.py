@@ -335,3 +335,26 @@ def test_upgraded_same_owner_0644_lock_is_narrowed_not_inaccessible(tmp_path):
     os.link(lock, tmp_path / 'alias')
     assert missing_owner_state(home) == 'inaccessible'
     assert stat.S_IMODE(lock.stat().st_mode) == 0o644
+
+
+@pytest.mark.platforms("linux")
+def test_a_uid_above_the_signed_int_maximum_is_read_as_unsigned():
+    """SO_PEERCRED's uid_t/gid_t are unsigned 32-bit, but the ucred was unpacked as three SIGNED
+    ints: a UID >= 2**31 (GCP OS Login, SSSD/AD id mapping) came back negative, so client and
+    server both compared it against os.getuid()'s unsigned value and refused their own socket as
+    unsafe_control_peer."""
+    import struct
+    from typing import cast
+
+    import hermes_cli.gateway_runtime_discovery as discovery
+
+    large_uid = 3_093_752_771  # the UID the report was filed from; > 2**31 - 1
+    assert large_uid > 2**31 - 1
+    ucred = struct.pack("=iII", 4321, large_uid, 4321)
+
+    class Peer:
+        def getsockopt(self, _level, _option, size):
+            assert size == len(ucred), "the peer credential struct is pid_t + uid_t + gid_t"
+            return ucred
+
+    assert discovery.socket_peer_uid(cast("socket.socket", Peer())) == large_uid

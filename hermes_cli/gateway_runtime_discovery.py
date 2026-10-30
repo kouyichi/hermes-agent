@@ -105,10 +105,17 @@ def _open_mode(path: Path, mode: int, expected: int) -> DiscoveryError:
 
 def socket_peer_uid(sock: socket.socket) -> int | None:
     """Kernel-reported uid of the process on the other end of a connected AF_UNIX socket
-    (SO_PEERCRED on Linux, getpeereid on macOS); None where neither exists."""
+    (SO_PEERCRED on Linux, getpeereid on macOS); None where neither exists.
+
+    ``struct ucred`` is ``pid_t`` (signed) then ``uid_t`` and ``gid_t`` (both UNSIGNED 32-bit), so the
+    credential is unpacked as ``iII``: reading the uid as a signed int turned every UID above 2**31 - 1
+    (GCP OS Login, SSSD/AD id mapping) negative, and the caller's ``uid != os.getuid()`` comparison then
+    refused the gateway's own socket as ``unsafe_control_peer``.
+    """
     if hasattr(socket, "SO_PEERCRED"):
         import struct
-        return struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[1]
+        ucred = struct.Struct("=iII")
+        return ucred.unpack(sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, ucred.size))[1]
     if sys.platform != "darwin":
         return None
     import ctypes
