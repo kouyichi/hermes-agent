@@ -30,6 +30,7 @@ from gateway.status_inline_source import (
 from hermes_constants import _get_platform_default_hermes_home, get_hermes_home, get_process_hermes_home
 from hermes_cli._subprocess_compat import pid_exists_stdlib
 from gateway.status_lock_dir import unusable_lock_dir, unusable_lock_dir_recovered
+from gateway.status_process_env import command_line_belongs_to_live_profile
 from utils import atomic_json_write
 
 if sys.platform == "win32":
@@ -757,9 +758,8 @@ def _record_matches_live_gateway_pid(
     record: dict[str, Any], pid: int, *, expected_home: Optional[Path] = None
 ) -> bool:
     """True when a live PID still identifies as this gateway record. The live command line wins (a
-    stale record's argv must not make a recycled PID count as a gateway; with ``expected_home`` it
-    must also belong to that profile — or serve it as the host multiplexer); unreadable cmdline
-    (Windows/EACCES) -> persisted record."""
+    stale record's argv must never let a recycled PID count as a gateway); with ``expected_home`` it
+    must also belong to that profile, serve it, or name it in its spawn env; unreadable -> record."""
     live_cmdline = _read_process_cmdline(pid)
     if not live_cmdline:
         return _record_looks_like_gateway(record)
@@ -767,7 +767,7 @@ def _record_matches_live_gateway_pid(
         return False
     if expected_home is not None and _host_gateway_serves_home(pid, expected_home):
         return True
-    return expected_home is None or _command_line_belongs_to_profile(live_cmdline, expected_home)
+    return expected_home is None or command_line_belongs_to_live_profile(pid, live_cmdline, expected_home)
 
 
 def _record_argv() -> list[str]:
