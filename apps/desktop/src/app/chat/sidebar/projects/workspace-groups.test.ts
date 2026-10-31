@@ -8,6 +8,7 @@ import {
   baseName,
   excludeProjectSessions,
   kanbanWorktreeDir,
+  laneLeadingIcon,
   laneSwitchTarget,
   liveSessionProjectId,
   mergeRepoWorktreeGroups,
@@ -1502,5 +1503,25 @@ describe('project filter row rule (#97762)', () => {
 
     expect(sessionBucketId(stamped, projects, owners)).toBe(NO_PROJECT_ID)
     expect(sessionMatchesProjectFilter(stamped, [NO_PROJECT_ID], projects, owners)).toBe(true)
+  })
+})
+
+describe('laneLeadingIcon', () => {
+  it('marks a non-git folder lane with a folder glyph, not a branch', () => {
+    // `_place_by_heuristic` files a plain folder as a main lane with
+    // `is_git: false` (#61362): it has no branch to switch, so it must not read
+    // as one either.
+    expect(laneLeadingIcon(lane({ id: 'notes', isGit: false, isMain: true, label: 'notes' }))).toBe('folder')
+  })
+
+  it('keeps the board, home and branch glyphs', () => {
+    expect(laneLeadingIcon(lane({ id: 'board', isKanban: true, label: 'kanban' }))).toBe('checklist')
+    expect(laneLeadingIcon(lane({ id: 'home', isHome: true, label: 'main' }))).toBe('home')
+    expect(laneLeadingIcon(lane({ id: 'branch', isGit: true, label: 'feature' }))).toBe('git-branch')
+  })
+
+  // Lanes from an older backend omit the flag; they have always read as git.
+  it('treats a lane with no isGit flag as a git lane', () => {
+    expect(laneLeadingIcon(lane({ id: 'legacy', label: 'feature' }))).toBe('git-branch')
   })
 })

@@ -195,6 +195,27 @@ const laneRank = (group: SidebarSessionGroup): number =>
   group.isHome ? 0 : isTrunkLane(group) ? 1 : group.isKanban ? 3 : 2
 
 /**
+ * Leading glyph for a lane row: the kanban aggregate reads as a board, the
+ * repo's home checkout as a home, and a NON-GIT folder lane as a plain folder —
+ * the backend's `_place_by_heuristic` marks it `isGit: false` because there is
+ * no branch there to switch (#61362). Every other lane is a branch. Missing
+ * `isGit` (a lane from an older backend) still reads as git.
+ */
+export function laneLeadingIcon(
+  group: Pick<SidebarSessionGroup, 'isGit' | 'isHome' | 'isKanban'>
+): 'checklist' | 'folder' | 'git-branch' | 'home' {
+  if (group.isKanban) {
+    return 'checklist'
+  }
+
+  if (group.isHome) {
+    return 'home'
+  }
+
+  return group.isGit === false ? 'folder' : 'git-branch'
+}
+
+/**
  * Sort by tier (home → trunk → branches/worktrees → kanban); within a tier, by
  * most-recent activity (empty lanes fall last), label as the tiebreak.
  */

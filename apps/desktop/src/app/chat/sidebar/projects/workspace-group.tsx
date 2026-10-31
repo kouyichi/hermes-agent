@@ -19,7 +19,7 @@ import { SidebarGroupRow, SidebarRowLead, SidebarRowLink, SidebarRowStack } from
 import { rankSessions } from '../order'
 
 import { PROJECT_PREVIEW_COUNT, SIDEBAR_GROUP_PAGE, useRevealedRows, useWorkspaceNodeOpen } from './model'
-import { laneSwitchTarget, type SidebarSessionGroup } from './workspace-groups'
+import { laneLeadingIcon, laneSwitchTarget, type SidebarSessionGroup } from './workspace-groups'
 import {
   WorkspaceAddButton,
   WorkspaceContextMenu,
@@ -80,13 +80,9 @@ export function SidebarWorkspaceGroup({
   const nextCount = isProfileGroup || showAllSessions ? 0 : lane.more
 
   // Leading glyph: a home mark for the repo's primary checkout (labeled by its
-  // live branch), a branch/kanban mark otherwise.
+  // live branch), a folder mark for a non-git lane, a branch/kanban mark otherwise.
   const leadingIcon = (
-    <Codicon
-      className="shrink-0 text-(--ui-text-tertiary)"
-      name={group.isKanban ? 'checklist' : group.isHome ? 'home' : 'git-branch'}
-      size="0.75rem"
-    />
+    <Codicon className="shrink-0 text-(--ui-text-tertiary)" name={laneLeadingIcon(group)} size="0.75rem" />
   )
 
   const prepareWorkspaceTarget = async () => {
