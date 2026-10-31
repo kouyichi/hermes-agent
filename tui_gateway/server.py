@@ -1265,24 +1265,23 @@ _BOOL_WORDS = {
 
 
 def _restart_slash_worker(sid: str, session: dict):
-    # Close the slash-worker subprocess as part of finalize itself, not just in the callers.
-    # Defense-in-depth: every session-end path goes through _finalize_session (it's the single
-    # ``_finalized``-guarded chokepoint), so folding worker cleanup in here means a future code path that
-    # calls _finalize_session directly — without the surrounding _teardown_session / _shutdown_sessions
-    # worker.close() — can't reintroduce the #38095 leak. Idempotent: _SlashWorker.close() is
-    # poll()-guarded, so the explicit close() still in those callers is harmless.
+    # Build the replacement BEFORE closing the live worker: a failed spawn (thread/fd pressure, an unscoped
+    # secret, a provider lookup) used to wipe the session's worker silently, so every later / command found
+    # nothing to route to (#147104). Keep the healthy one and say why. close() is poll()-guarded, so the
+    # close below still covers the finalize-path cleanup #38095 relies on and stays idempotent for callers.
     worker = session.get("slash_worker")
     if worker is None:
         return  # never spawned one; spawning here would fork the per-worker MCP fleet for nothing
-    with contextlib.suppress(Exception):
-        worker.close()
     try:
         new_worker = _SlashWorker(session["session_key"], getattr(session.get("agent"), "model", _resolve_model()),
                                   profile_home=session.get("profile_home"),
                                   provider=getattr(session.get("agent"), "provider", None) or None)
     except Exception:
-        session["slash_worker"] = None
+        logger.warning("slash worker restart failed for session %s; keeping the live worker",
+                       sid, exc_info=True)
         return
+    with contextlib.suppress(Exception):
+        worker.close()
     # Store-iff-still-mapped: the post-turn restart races a close_on_disconnect reap (a bare store would orphan it).
     _attach_worker(sid, session, new_worker)
 
