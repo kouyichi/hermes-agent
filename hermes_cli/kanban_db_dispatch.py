@@ -1383,7 +1383,7 @@ def _record_task_failure(
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
-    consistent. Returns True when the task was auto-blocked.
+    consistent; a terminal card writes nothing (#146973). Returns True when auto-blocked.
 
     ``release_claim=True, end_run=True``: spawn-failure path (task still
     running with an open run — restore source phase or ``blocked``, release
@@ -1407,7 +1407,7 @@ def _record_task_failure(
             "SELECT consecutive_failures, status, max_retries, current_run_id "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
-        if row is None:
+        if row is None or row["status"] in ("done", "archived"):
             return False
         retry_status = (
             _kb._retry_status_for_run(conn, task_id, row["current_run_id"])
