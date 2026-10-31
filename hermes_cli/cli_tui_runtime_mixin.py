@@ -503,7 +503,7 @@ class CLITuiRuntimeMixin:
         # Without this line the terminal sits silent through the whole cleanup window.
         with suppress(Exception):
             print(f"{_DIM}{t('cli.tui.shutting_down')}{_RST}", flush=True)
-        from hermes_cli.cli_shutdown import _gateway_owns_session_end
+        from hermes_cli.cli_shutdown import _channel_session_outlives_the_cli, _gateway_owns_session_end
         if self.agent and self._agent_running and not (
                 self._detach_on_exit and _gateway_owns_session_end(self.agent)):
             # A gateway turn left by Ctrl+D is not interrupted: ``end_session`` below detaches this
@@ -529,7 +529,8 @@ class CLITuiRuntimeMixin:
         _closing_sid = self._closing_session_id()
         if self._session_db and _closing_sid:
             try:
-                self._session_db.end_session(_closing_sid, "cli_close")
+                if not _channel_session_outlives_the_cli(self._session_db, _closing_sid, self.agent):
+                    self._session_db.end_session(_closing_sid, "cli_close")
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Could not close session in DB: %s", e)
             if not self._delete_session_on_exit:

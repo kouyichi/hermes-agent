@@ -163,6 +163,33 @@ def _gateway_owns_session_end(agent) -> bool:
     return isinstance(agent, GatewayAgent)
 
 
+def _channel_session_outlives_the_cli(db, session_id, agent=None) -> bool:
+    """A messaging channel owns its row; a CLI that merely *resumed* it must not end it.
+
+    ``hermes chat -r <session>`` attaches a local agent to a channel conversation. Stamping
+    ``cli_close`` on exit put that row outside the gateway's reopen whitelist
+    (``hermes_state_common._RECOVERABLE_END_REASONS``), so the channel's stale-route self-heal
+    could not recover it and the next inbound message minted a fresh empty session, orphaning the
+    conversation (#147071). A viewer leaving is not a conversation ending: a keyed messaging row
+    stays open for its owner. Gateway-backed sessions keep their own path (``end_session`` there
+    is a ``session.detach`` the owner settles, gateway/session_viewer_close), and rows this CLI
+    created (``cli``/``tui``/… sources) still close as before.
+    """
+    if not db or not session_id:
+        return False
+    try:
+        row = db.get_session(session_id)
+    except Exception:  # health: allow BLE001 -- a store error must never block the exit path
+        return False
+    if not isinstance(row, dict) or row.get("ended_at"):
+        return False
+    from gateway.session_context import NON_MESSAGING_SESSION_SURFACES
+    source = str(row.get("source") or "").strip().lower()
+    if not str(row.get("session_key") or "").strip() or source in NON_MESSAGING_SESSION_SURFACES:
+        return False
+    return not _gateway_owns_session_end(agent)
+
+
 def _should_emit_cleanup_session_finalize(session_id: str | None) -> bool:
     if _gateway_owns_session_end(_cli()._active_agent_ref):
         return False
@@ -286,7 +313,8 @@ def _flush_one_shot_session_store(cli) -> None:
     except Exception:
         logger.debug("one-shot token-count drain failed", exc_info=True)
     try:
-        db.end_session(session_id, "cli_close")
+        if not _channel_session_outlives_the_cli(db, session_id, agent):
+            db.end_session(session_id, "cli_close")
     except Exception:
         logger.debug("one-shot end_session failed", exc_info=True)
 
