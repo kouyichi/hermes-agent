@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-
 from agent import redact
 from tui_gateway import server
 
@@ -12,18 +10,20 @@ def test_shell_exec_scrubs_child_env_and_force_redacts_rpc_output(monkeypatch):
     secret = "sk-shell-exec-secret-1234567890"
     captured = {}
 
-    def fake_run(command, **kwargs):
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=f"visible\n{secret}\n",
-            stderr=f"diagnostic {secret}",
-        )
+    class _FakePopen:
+        """The RPC's spawn seam: ``shell.exec`` reaps its own process group now (#147103), so
+        the child is started through ``capture_exec.run_captured`` rather than ``subprocess.run``."""
+
+        def __init__(self, command, **kwargs):
+            captured.update(kwargs)
+            self.returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            return f"visible\n{secret}\n", f"diagnostic {secret}"
 
     monkeypatch.setenv("OPENROUTER_API_KEY", secret)
     monkeypatch.setattr(redact, "_REDACT_ENABLED", False)
-    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr("tui_gateway.capture_exec.subprocess.Popen", _FakePopen)
 
     response = server.handle_request(
         {"id": "security", "method": "shell.exec", "params": {"command": "echo safe"}}

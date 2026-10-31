@@ -233,12 +233,18 @@ def test_tui_shell_exec_rpc_hides_console_window(monkeypatch):
 
     captured = []
 
-    def fake_run(cmd, **kwargs):
-        captured.append((cmd, kwargs))
-        return _Completed(stdout="ok\n")
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured.append((cmd, kwargs))
+            self.returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            return "ok\n", ""
 
     _patch_hide_flags(monkeypatch)
-    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    # shell.exec spawns through ``capture_exec.run_captured`` (the timeout reaps the child's
+    # process group, #147103), so the console-hiding wiring lives on that Popen call.
+    monkeypatch.setattr("tui_gateway.capture_exec.subprocess.Popen", _FakePopen)
 
     resp = server.handle_request(
         {"id": "2", "method": "shell.exec", "params": {"command": "echo shellexec-56747"}}

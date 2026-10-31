@@ -190,20 +190,14 @@ def _exec_out(rid, output: str) -> dict:
     return _ok(rid, {"type": "exec", "output": output})
 
 
-def _capture_run_kwargs(timeout: int) -> dict:
-    """Shared captured-text subprocess.run kwargs: UTF-8 + lossy decode (non-UTF-8 child output must
-    not crash the gateway thread on Windows), no stdin, no console flash under the desktop parent."""
-    return dict(
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
-        stdin=subprocess.DEVNULL, creationflags=_tools_mod("hermes_cli._subprocess_compat").windows_hide_flags())
-
-
 def _captured_exec(rid, cmd, timeout: int, *, on_result, timeout_err: tuple, fail_code: int,
                    shell: bool = False, env: dict | None = None) -> dict:
-    """Run ``cmd`` captured (see ``_capture_run_kwargs``) and hand the CompletedProcess to
-    ``on_result``; TimeoutExpired → ``timeout_err`` (code, message), other errors → ``fail_code``."""
+    """Run ``cmd`` captured (see ``capture_exec.run_captured``, which reaps the whole process
+    tree on timeout) and hand the CompletedProcess to ``on_result``; TimeoutExpired →
+    ``timeout_err`` (code, message), other errors → ``fail_code``."""
     try:
-        return on_result(subprocess.run(cmd, cwd=os.getcwd(), shell=shell, env=env, **_capture_run_kwargs(timeout)))
+        return on_result(_tools_mod("tui_gateway.capture_exec").run_captured(
+            cmd, timeout, cwd=os.getcwd(), shell=shell, env=env))
     except subprocess.TimeoutExpired:
         return _err(rid, *timeout_err)
     except Exception as e:
@@ -481,7 +475,8 @@ def _dispatch_quick(rid, params, session, name, arg):
     if qc.get("type") == "exec":
         # Sanitized env: the TUI server process holds every API key in os.environ.
         env = _tools_mod("tools.environments.local").build_subprocess_env()
-        r = subprocess.run(qc.get("command", ""), shell=True, env=env, **_capture_run_kwargs(30))
+        r = _tools_mod("tui_gateway.capture_exec").run_captured(
+            qc.get("command", ""), 30, cwd=os.getcwd(), shell=True, env=env)
         output = _joined_output(r)[:4000]
         output = _tools_mod("agent.redact").redact_sensitive_text(output) if output else output
         if r.returncode != 0:
