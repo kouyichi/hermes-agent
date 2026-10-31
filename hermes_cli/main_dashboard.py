@@ -418,10 +418,17 @@ def _respawnable_command_for_current_install(argv: list[str]) -> list[str]:
     return list(argv)
 
 
-def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
+def _respawn_dashboard_processes(
+    commands: list[list[str]], *, cwd_by_command: dict[tuple[str, ...], str | None] | None = None,
+) -> list[list[str]]:
     """Respawn manually-started dashboards after ``hermes update``, detached, logging to
     ``logs/dashboard-restart.log``; returns the argvs that failed to spawn. Callers pre-filter via
     ``_filter_dashboard_respawn_candidates`` (no Desktop ``--port 0`` backends, capped per profile).
+
+    *cwd_by_command* carries the launch directory captured before the kill, keyed by the caller's
+    argv: a backend's cwd decides which context files load into every session's prompt, so the
+    respawn must not inherit the update process's own directory (#146565). A recorded directory
+    that no longer exists is dropped rather than failing the spawn.
 
     See #78821.
     """
@@ -439,10 +446,15 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
         # background update is noisy and fails in SSH/headless sessions.
         if "dashboard" in command and "--no-open" not in command:
             command = [*command, "--no-open"]
+        cwd = (cwd_by_command or {}).get(tuple(original))
+        if cwd is not None and not os.path.isdir(cwd):
+            cwd = None
         try:
             with open(log_path, "ab") as log_f:
                 proc = subprocess.Popen(
                     command, stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
+                    # Restore the launch directory: it decides which context files load.
+                    cwd=cwd,
                     # detached-spawn: ok — dashboard service launch, meant to outlive the CLI that starts it
                     start_new_session=True, close_fds=True)
             spawned.append((original, command, proc))

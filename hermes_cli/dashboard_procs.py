@@ -140,6 +140,24 @@ def _pid_environ(pid: int) -> dict[str, str] | None:
     return env
 
 
+def _pid_cwd(pid: int) -> str | None:
+    """Working directory of *pid* (psutil, then /proc); ``None`` when unreadable.
+
+    Read BEFORE the kill: a respawned backend loads its context files (repo ``AGENTS.md``,
+    ``CLAUDE.md``) from this directory, and the update process's own cwd is not a substitute —
+    inheriting it silently rewrites every dashboard session's system prompt (#146565).
+    """
+    with contextlib.suppress(Exception):
+        import psutil
+        cwd = psutil.Process(pid).cwd()
+        if cwd:
+            return str(cwd)
+    try:
+        return os.readlink(f"/proc/{pid}/cwd").removesuffix(" (deleted)") or None
+    except OSError:
+        return None
+
+
 def _pid_passwd_home(pid: int) -> str | None:
     """Login home of the user *pid* runs as, from the password database (psutil, then /proc).
 
@@ -655,6 +673,7 @@ def _kill_stale_dashboard_processes(
     pid_launchd: dict[int, tuple[str, str, int | None]] = {}
     pid_cmdline: dict[int, list[str]] = {}
     pid_home: dict[int, str | None] = {}
+    pid_cwd: dict[int, str | None] = {}
     # macOS: a backend supervised by a launchd job (LaunchAgent / LaunchDaemon) must come back
     # through launchd, never as a detached argv respawn — the respawn holds the job's port, the
     # job then fails every KeepAlive restart with "port already in use", and the running backend
@@ -681,6 +700,9 @@ def _kill_stale_dashboard_processes(
                 # after the process is gone (#78821).
                 pid_cmdline[pid] = cmdline
                 pid_home[pid] = _hermes_home_for_pid(pid)
+                # Snapshot the launch directory too: the respawn must come back where the operator
+                # started it, or every session's context-file set changes (#146565).
+                pid_cwd[pid] = _pid_cwd(pid)
         if already_restarted_units:
             pids = [pid for pid in pids if (pid_service.get(pid) or "").removesuffix(".service")
                     not in already_restarted_units]
@@ -700,7 +722,8 @@ def _kill_stale_dashboard_processes(
         print(f"    ✗ failed to stop PID {pid}: {err_msg}")
     if killed and restart_managed:
         unrecovered = _restart_killed_backends(
-            killed, pid_service, pid_cgroup, pid_cmdline, pid_home, pid_launchd=pid_launchd)
+            killed, pid_service, pid_cgroup, pid_cmdline, pid_home, pid_launchd=pid_launchd,
+            pid_cwd=pid_cwd)
     else:
         unrecovered = list(killed)
         # A stopped launchd job with KeepAlive restarts itself: say so instead of a misleading
@@ -717,9 +740,11 @@ def _kill_stale_dashboard_processes(
 def _restart_killed_backends(
     killed: list[int], pid_service: dict[int, str | None], pid_cgroup: dict[int, str | None],
     pid_cmdline: dict[int, list[str]], pid_home: dict[int, str | None], *,
-    pid_launchd: dict[int, tuple[str, str, int | None]] | None = None) -> list[int]:
+    pid_launchd: dict[int, tuple[str, str, int | None]] | None = None,
+    pid_cwd: dict[int, str | None] | None = None) -> list[int]:
     """Update path: restart systemd units, kickstart launchd jobs (macOS), respawn manual argv
     (detached, headless, logged to logs/dashboard-restart.log; one per profile, no ``--port 0``).
+    Respawned PIDs reuse the launch directory snapshotted in *pid_cwd*.
     Returns PIDs not brought back."""
     # Two categories: Without this, a remote backend (hermes serve) under Restart=on-failure never comes
     # back after our clean SIGTERM, and the Desktop can't reconnect (#68934). Filtered so Desktop
@@ -767,7 +792,20 @@ def _restart_killed_backends(
     for svc, err in failed_restarts:
         print(f"    ⚠ {svc}: {err}")
     respawn_cmds = _filter_dashboard_respawn_candidates(respawn_candidates)
-    failed_cmds = _dash._respawn_dashboard_processes(respawn_cmds) if respawn_cmds else None
+    # The filter returns argv only; key the launch directories by that same argv so the respawn can
+    # pass ``cwd=`` without changing its signature for the token-based relaunch callers. With no
+    # captured directory the call stays exactly as it was.
+    cwd_by_command: dict[tuple[str, ...], str | None] = {
+        tuple(argv): cwd
+        for pid, argv, _home in respawn_candidates
+        if (cwd := (pid_cwd or {}).get(pid))
+    }
+    failed_cmds = (
+        _dash._respawn_dashboard_processes(
+            respawn_cmds, **({"cwd_by_command": cwd_by_command} if cwd_by_command else {})
+        )
+        if respawn_cmds else None
+    )
     if failed_cmds:
         unrecovered.extend(p for p in killed if pid_cmdline.get(p) in failed_cmds)
     if failed_restarts or unrecovered:
