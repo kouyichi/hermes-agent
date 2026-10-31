@@ -2166,8 +2166,7 @@ from gateway.cwd_placeholder import CWD_PLACEHOLDERS, resolve_placeholder_termin
 from gateway.config import (
     ChannelOverride, Platform, GatewayConfig, PlatformConfig, _getenv, load_gateway_config)
 from gateway.session import (
-    AsyncSessionStore, SessionStore, SessionSource, SessionContext, build_session_key,
-    profile_from_session_key_namespace)
+    AsyncSessionStore, SessionStore, SessionSource, SessionContext, build_session_key)
 # Telegram topic routing (#22773, regression fixed #52060): a
 # ``telegram:<positive_chat_id>:<numeric_thread_id>`` cron target is ambiguous — a forum-style topic in a
 # private chat and a genuine Bot API channel Direct-Messages topic share the same shape and need OPPOSITE
@@ -2940,32 +2939,10 @@ def _resolve_hermes_bin() -> Optional[list[str]]:
     return None
 
 
-_PROFILE_ID_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-
-
-def _parse_session_key(session_key: str) -> dict | None:
-    """Parse a session key (``agent:{ns}:{platform}:{chat_type}:{chat_id}[:{extra}...]``).
-
-    ``{ns}`` is ``main`` for the default profile, ``main~`` for a profile literally named ``main``
-    (``gateway.session._session_key_namespace``), or a named-profile id (profile ids match
-    ``[a-z0-9][a-z0-9_-]{0,63}`` — never contain ``:`` — so a plain split stays unambiguous).
-    For group/channel sessions the suffix may be a user_id, not a thread_id, so ``thread_id``
-    is omitted. Named profiles are reported as ``profile``; ``main`` keys keep their historical
-    shape exactly (no ``profile`` key) so equality assertions on parsed dicts stay stable.
-    """
-    parts = session_key.split(":")
-    if (
-        len(parts) >= 5
-        and parts[0] == "agent"
-        and (parts[1] in ("main", "main~") or _PROFILE_ID_KEY_RE.match(parts[1]))
-    ):
-        result = {"platform": parts[2], "chat_type": parts[3], "chat_id": parts[4]}
-        if parts[1] != "main":
-            result["profile"] = profile_from_session_key_namespace(parts[1])
-        if len(parts) > 5 and parts[3] in {"dm", "thread"}:
-            result["thread_id"] = parts[5]
-        return result
-    return None
+# The key's layout lives beside the builder that owns it (gateway/session_key_parse.py): the
+# positional read here dropped the Slack workspace slot and the per-user thread slot, so a route
+# rebuilt from its key re-keyed elsewhere and was refused with admission_conflict (#147196/#147197).
+from gateway.session_key_parse import parse_session_key as _parse_session_key
 
 
 def _shorten_command_for_display(command: str, limit: int = 80) -> str:

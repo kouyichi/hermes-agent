@@ -703,7 +703,17 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         def _opt(field: str) -> Optional[str]:
             return str(evt.get(field) or "").strip() or None
 
-        scope_id = _opt("scope_id")
+        def _opt_key(field: str) -> Optional[str]:
+            """*field* from the event, else from the key its route was rebuilt from.
+
+            A delegation or watch event can carry the session key alone (its routing origin was
+            pruned, #144006). Every slot the key proves — scope, thread, participant — has to come
+            back, or the rebuilt source re-keys to the shared route and the wake is refused with
+            ``admission_conflict`` (#147196/#147197).
+            """
+            return _opt(field) or (str(derived.get(field) or "").strip() or None)
+
+        scope_id = _opt_key("scope_id")
         if scope_id is None and chat_type not in ("dm", "thread"):
             # Reconstructed scoped-chat source without scope_id: a relay connector's tenant guard may
             # decline the reply. Warn, don't fail (native adapters need no scope_id).
@@ -713,8 +723,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 "the connector's tenant guard (user_id fallback only).", platform_name, chat_id, chat_type,
             )
         return SessionSource(
-            platform=platform, chat_id=chat_id, chat_type=chat_type, thread_id=_opt("thread_id"),
-            user_id=_opt("user_id"), user_name=_opt("user_name"), scope_id=scope_id, profile=profile,
+            platform=platform, chat_id=chat_id, chat_type=chat_type, thread_id=_opt_key("thread_id"),
+            user_id=_opt_key("user_id"), user_name=_opt("user_name"), scope_id=scope_id, profile=profile,
         )
 
     async def _drain_watch_notifications(self, completion_queue) -> None:
