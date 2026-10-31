@@ -185,6 +185,7 @@ def test_engine_construction_ensures_audio_io_only_for_local_capture(monkeypatch
     mod = types.ModuleType("pyopen_wakeword")
     mod.OpenWakeWord = _FakeModel
     mod.OpenWakeWordFeatures = _FakeFeatures
+    mod.Model = ()  # no built-in names here: these cases exercise paths/aliases
     monkeypatch.setitem(sys.modules, "pyopen_wakeword", mod)
 
     cfg = {"provider": "openwakeword"}
@@ -433,6 +434,7 @@ def test_openwakeword_custom_model_path_used(monkeypatch):
     mod = types.ModuleType("pyopen_wakeword")
     mod.OpenWakeWord = _FakeModel
     mod.OpenWakeWordFeatures = _FakeFeatures
+    mod.Model = ()  # no built-in names here: these cases exercise paths/aliases
     monkeypatch.setitem(sys.modules, "pyopen_wakeword", mod)
     monkeypatch.setattr(pm, "ensure_import", lambda *a, **k: None)
     eng = ww._OpenWakeWordEngine(
@@ -449,6 +451,110 @@ def test_bundled_hey_hermes_model_ships_on_disk():
     assert os.path.exists(path), path
     assert os.path.getsize(path) > 1024, path
 
+
+def _fake_pyopen_wakeword(monkeypatch, names=("okay_nabu", "hey_jarvis", "alexa")):
+    """Install a fake ``pyopen_wakeword`` that records how the model was loaded.
+
+    Mirrors the shipped API (``Model`` enum + ``OpenWakeWord.from_model`` /
+    ``.from_builtin(model)``) so a test can tell a built-in name from a path.
+    """
+    calls: dict[str, str] = {}
+
+    class _Member:
+        def __init__(self, value):
+            self.value = value
+
+    class _Models:
+        def __iter__(self):
+            return iter(_Member(name) for name in names)
+
+    class _FakeModel:
+        def __init__(self, model_id):
+            self.id = model_id
+
+        @staticmethod
+        def from_model(model_path, libtensorflowlite_c_path=None):
+            calls["from_model"] = str(model_path)
+            return _FakeModel(os.path.splitext(os.path.basename(str(model_path)))[0])
+
+        @staticmethod
+        def from_builtin(model, models_dir=None, libtensorflowlite_c_path=None):
+            calls["from_builtin"] = model.value
+            return _FakeModel(model.value)
+
+        def process_streaming(self, embeddings):
+            return iter(())
+
+        def reset(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _FakeFeatures:
+        @staticmethod
+        def from_builtin(models_dir=None, libtensorflowlite_c_path=None):
+            return _FakeFeatures()
+
+        def process_streaming(self, audio_chunk):
+            return iter(())
+
+        def reset(self):
+            pass
+
+        def close(self):
+            pass
+
+    mod = types.ModuleType("pyopen_wakeword")
+    mod.OpenWakeWord = _FakeModel
+    mod.OpenWakeWordFeatures = _FakeFeatures
+    mod.Model = _Models()
+    monkeypatch.setitem(sys.modules, "pyopen_wakeword", mod)
+    monkeypatch.setattr(pm, "ensure_import", lambda *a, **k: None)
+    return calls
+
+
+def _openwakeword_engine(model):
+    return ww._OpenWakeWordEngine({"provider": "openwakeword", "openwakeword": {"model": model}})
+
+
+def test_builtin_openwakeword_name_arms_the_bundled_openwakeword_model(monkeypatch):
+    # ``hey_jarvis`` is documented as a valid ``wake_word.openwakeword.model``
+    # value, but a bare name is not a path: from_model() handed it to the native
+    # TFLite loader and the process segfaulted (#147249).
+    calls = _fake_pyopen_wakeword(monkeypatch)
+    eng = _openwakeword_engine("hey_jarvis")
+    assert calls == {"from_builtin": "hey_jarvis"}
+    assert eng._labels == ["hey_jarvis"]
+
+
+def test_builtin_name_match_ignores_case(monkeypatch):
+    calls = _fake_pyopen_wakeword(monkeypatch)
+    _openwakeword_engine("Hey_Jarvis")
+    assert calls == {"from_builtin": "hey_jarvis"}
+
+
+def test_unknown_bare_name_still_goes_to_from_model(monkeypatch):
+    # Only names the shipped ``Model`` enum knows are built-ins. Everything else
+    # keeps the old pass-through, so the missing-model guard stays the one place
+    # that reports a typo.
+    calls = _fake_pyopen_wakeword(monkeypatch)
+    _openwakeword_engine("hey_jarviss")
+    assert calls == {"from_model": "hey_jarviss"}
+
+
+def test_a_model_file_named_like_a_builtin_still_loads_from_its_path(monkeypatch, tmp_path):
+    calls = _fake_pyopen_wakeword(monkeypatch)
+    custom = tmp_path / "alexa.tflite"
+    custom.write_bytes(b"\x00" * 8)
+    _openwakeword_engine(str(custom))
+    assert calls == {"from_model": str(custom)}
+
+
+def test_bundled_alias_still_loads_the_shipped_hey_hermes_model(monkeypatch):
+    calls = _fake_pyopen_wakeword(monkeypatch)
+    _openwakeword_engine("hermes")
+    assert calls == {"from_model": ww._bundled_wakeword_path()}
 
 
 # ── Detector loop ────────────────────────────────────────────────────────

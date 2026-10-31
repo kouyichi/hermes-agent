@@ -70,6 +70,21 @@ def _looks_like_path(value: str) -> bool:
     return os.sep in value or value.endswith((".onnx", ".tflite", ".ppn")) or os.path.exists(value)
 
 
+def _openwakeword_builtin_model(model_ref: str, model_cls) -> Optional[Any]:
+    """Map a documented openWakeWord built-in name onto its ``Model`` member.
+
+    ``OpenWakeWord.from_model`` reads its argument as a PATH, so a bare built-in
+    name (``hey_jarvis``, ``alexa``, ...) reached the native TFLite loader as a
+    nonexistent file and segfaulted the process (#147249). Anything shaped like a
+    path keeps going to ``from_model``, and so does an unrecognised bare name, so
+    the caller-side missing-model guard stays the single reporter for a typo.
+    """
+    if _looks_like_path(model_ref):
+        return None
+    lowered = model_ref.lower()
+    return next((m for m in model_cls if str(getattr(m, "value", "")).lower() == lowered), None)
+
+
 def _sub(cfg: dict[str, Any], key: str) -> dict[str, Any]:
     sub = cfg.get(key)
     return sub if isinstance(sub, dict) else {}
@@ -85,15 +100,17 @@ class _OpenWakeWordEngine(_Engine):
     feature, section = "wake-openwakeword", "openwakeword"
 
     def _build(self, cfg, sub, ww) -> None:
-        from pyopen_wakeword import OpenWakeWord, OpenWakeWordFeatures
+        from pyopen_wakeword import Model, OpenWakeWord, OpenWakeWordFeatures
 
         model_ref = str(sub.get("model") or ww._BUNDLED_MODEL_NAME).strip()
         # Default (or explicit "hey_hermes") → the bundled model; a custom path
-        # is used as-is. pyopen-wakeword bundles the shared feature models
+        # is used as-is; a name the package ships (hey_jarvis, alexa, ...) → its
+        # built-in model. pyopen-wakeword bundles the shared feature models
         # (melspectrogram + embedding — byte-identical to the openWakeWord
         # v0.5.1 files) inside its wheel, so there is no download_models step.
         if model_ref.lower() in ww._BUNDLED_MODEL_ALIASES:
             model_ref = ww._bundled_wakeword_path()
+        builtin_model = _openwakeword_builtin_model(model_ref, Model)
         # pyopen-wakeword returns a 0..1 score per completed window; sensitivity
         # IS the raw threshold a score must clear. Higher = stricter (fewer
         # false fires). Default 0.6 sits above openWakeWord's permissive 0.5
@@ -102,7 +119,10 @@ class _OpenWakeWordEngine(_Engine):
         self._confirm_needed = ww._confirmation_frames(cfg)
         self._confirm_streak = 0
         self._features = OpenWakeWordFeatures.from_builtin()
-        self._model = OpenWakeWord.from_model(model_ref)
+        if builtin_model is not None:
+            self._model = OpenWakeWord.from_builtin(builtin_model)
+        else:
+            self._model = OpenWakeWord.from_model(model_ref)
         self._labels = [self._model.id]
 
     def process(self, frame) -> bool:
