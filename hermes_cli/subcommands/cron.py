@@ -233,6 +233,9 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Action (default: list)")
     cron_notepad.add_argument("key", nargs="?", help="Notepad key (get/set/delete)")
     cron_notepad.add_argument("value", nargs="?", help="Value to store (set)")
+    cron_notepad.add_argument(
+        "--file", dest="value_file", metavar="PATH",
+        help="Read the value from PATH ('-' for stdin); avoids shell quoting for long values")
 
     cron_subparsers.add_parser("doctor", help="Check scheduled jobs for common health issues")
 

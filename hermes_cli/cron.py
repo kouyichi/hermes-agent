@@ -948,6 +948,19 @@ def cron_resume(args) -> int:
     return 0
 
 
+def _notepad_value_from_file(path: str) -> str:
+    """Value text for ``hermes cron notepad ... set --file PATH`` (``-`` reads stdin).
+
+    Trailing newlines are dropped: a here-doc, ``echo`` or an editor all end the file with one, and
+    the stored value is what the caller wrote, not that newline showing up in every run's prompt.
+    """
+    if path == "-":
+        text = sys.stdin.read()
+    else:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    return text.rstrip("\r\n")
+
+
 def cron_notepad(args) -> int:
     """Handle ``hermes cron notepad <job_id> [get|set|delete|list]`` (per-job durable KV).
 
@@ -959,6 +972,7 @@ def cron_notepad(args) -> int:
     action = getattr(args, "notepad_action", None) or "list"
     key = getattr(args, "key", None)
     value = getattr(args, "value", None)
+    value_file = getattr(args, "value_file", None)
     if not job_id:
         print(color("A job ID is required.", Colors.RED))
         return 1
@@ -971,12 +985,22 @@ def cron_notepad(args) -> int:
                 print(f"  {color(note['key'], Colors.YELLOW)} = {note['value']}\n"
                       f"    {color('updated: ' + str(note['updated_at']), Colors.DIM)}")
             return 0
-        usage_args = "set <key> <value>" if action == "set" else f"{action} <key>"
-        if key is None or (action == "set" and value is None):
+        if action == "set" and value is not None and value_file is not None:
+            print(color("Give either a value or --file, not both.", Colors.RED))
+            return 1
+        usage_args = "set <key> <value>|--file PATH" if action == "set" else f"{action} <key>"
+        if key is None or (action == "set" and value is None and value_file is None):
             print(color(f"Usage: hermes cron notepad <job_id> {usage_args}", Colors.RED))
             return 1
         if action == "set":
-            notepad.set_note(job_id, key, value)
+            text: str = value or ""
+            if value_file is not None:
+                try:
+                    text = _notepad_value_from_file(value_file)
+                except OSError as exc:
+                    print(color(f"Cannot read {value_file}: {exc}", Colors.RED))
+                    return 1
+            notepad.set_note(job_id, key, text)
             print(color(f"Set notepad key '{key}' for job {job_id}.", Colors.GREEN))
             return 0
         if action == "get":
