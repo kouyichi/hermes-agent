@@ -15,6 +15,11 @@ export interface ConfigFieldSchema {
    *  value to ''. Matches the existing <Select> EMPTY_SELECT_VALUE pattern. */
   clearable?: boolean
   type?: 'boolean' | 'list' | 'number' | 'select' | 'string' | 'text'
+  /** Numeric input constraints, for fields whose unit is not a plain count
+   *  (#147540). Absent = the native number input's default step of 1. */
+  min?: number
+  max?: number
+  step?: number
 }
 
 export interface ConfigSchemaResponse {

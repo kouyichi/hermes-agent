@@ -190,6 +190,13 @@ _SCHEMA_OVERRIDES: dict[str, dict[str, Any]] = {
             "0 disables the deadline; values above 600 are clamped."
         ),
     },
+    # Ratio-valued settings carry numeric constraints so the UI's native number input steps
+    # them at a meaningful granularity (#147540). Entries may be PARTIAL: they merge over the
+    # inferred type/description/category, so only the bound that differs belongs here. A
+    # default inside (0, 1) is deliberately NOT treated as proof of a ratio — e.g.
+    # voice.barge_in_grace_seconds defaults to 0.5 and is a duration, not a fraction.
+    "compression.threshold": {"min": 0.0, "max": 1.0, "step": 0.05},
+    "compression.target_ratio": {"min": 0.0, "max": 1.0, "step": 0.05},
 }
 
 # Small categories fold into a bigger tab to avoid one-field orphan tabs. Several sources

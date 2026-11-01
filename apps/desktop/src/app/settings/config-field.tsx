@@ -191,6 +191,8 @@ export function ConfigField({
     return row(
       <Input
         className={CONTROL_TEXT}
+        max={schema.max}
+        min={schema.min}
         onChange={e => {
           const raw = e.target.value
           const n = raw === '' ? 0 : Number(raw)
@@ -200,6 +202,7 @@ export function ConfigField({
           }
         }}
         placeholder={c.notSet}
+        step={schema.step}
         type="number"
         value={value === undefined || value === null ? '' : String(value)}
       />

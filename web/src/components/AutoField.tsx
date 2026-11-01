@@ -28,6 +28,22 @@ function formatScalar(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/** Numeric input constraints declared by a config field's schema (#147540). A
+ *  ratio field without a `step` steps by the HTML default of 1, so 0.5 becomes
+ *  1.5 in one spinner click. Absent keys stay absent: a plain count must keep
+ *  the native default step. */
+function numericBounds(schema: Record<string, unknown>) {
+  const bounds: { max?: number; min?: number; step?: number } = {};
+
+  for (const key of ["max", "min", "step"] as const) {
+    const raw = schema[key];
+
+    if (typeof raw === "number" && Number.isFinite(raw)) bounds[key] = raw;
+  }
+
+  return bounds;
+}
+
 function NestedValueEditor({
   fieldKey,
   value,
@@ -137,6 +153,7 @@ export function AutoField({
         <FieldHint schema={schema} schemaKey={schemaKey} />
         <Input
           type="number"
+          {...numericBounds(schema)}
           value={value === undefined || value === null ? "" : String(value)}
           onChange={(e) => {
             const raw = e.target.value;
