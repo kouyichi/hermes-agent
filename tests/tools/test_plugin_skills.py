@@ -117,6 +117,25 @@ class TestPluginContextRegisterSkill:
         with pytest.raises(FileNotFoundError):
             ctx.register_skill("foo", tmp_path / "nonexistent.md")
 
+    def test_skill_directory_is_normalized_to_its_skill_md(self, ctx, tmp_path):
+        """A plugin naturally hands over its ``skills/<name>/`` folder (#147374). That used to register
+        the directory, which then failed on every read with EISDIR/Errno 13 instead of registering."""
+        skill_dir = tmp_path / "skills" / "my-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: my-skill\n---\nContent.\n")
+
+        ctx.register_skill("my-skill", skill_dir, "A test skill")
+
+        assert ctx._manager.find_plugin_skill("testplugin:my-skill") == skill_dir / "SKILL.md"
+
+    def test_directory_without_skill_md_is_rejected(self, ctx, tmp_path):
+        skill_dir = tmp_path / "skills" / "my-skill"
+        skill_dir.mkdir(parents=True)
+
+        with pytest.raises(FileNotFoundError, match="SKILL.md not found"):
+            ctx.register_skill("my-skill", skill_dir)
+        assert ctx._manager.find_plugin_skill("testplugin:my-skill") is None
+
     def test_accepts_str_path(self, ctx, tmp_path):
         # Plugin register() helpers commonly pass the SKILL.md location as str
         # (#104404); this used to abort the whole plugin load with
@@ -194,6 +213,28 @@ class TestSkillViewQualifiedName:
         assert result["success"] is True
         assert result["name"] == "superpowers:writing-plans"
         assert "writing-plans body." in result["content"]
+
+    def test_skill_registered_from_its_directory_serves(self, tmp_path):
+        """The reported failure (#147374): a plugin that registered its skill FOLDER showed up in
+        ``skills_list`` and then answered every ``skill_view`` with EISDIR/Errno 13."""
+        from hermes_cli.plugins import PluginContext, PluginManifest
+        from tools.skills_tool import skill_view
+
+        skill_dir = tmp_path / "plugins" / "superpowers" / "skills" / "writing-plans"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: writing-plans\ndescription: writing-plans desc\n---\n\nwriting-plans body.\n")
+
+        PluginContext(
+            PluginManifest(name="superpowers", version="1.0.0", description="test", source="user"),
+            self.pm,
+        ).register_skill("writing-plans", skill_dir)
+
+        result = json.loads(skill_view("superpowers:writing-plans"))
+
+        assert result["success"] is True, result
+        assert "writing-plans body." in result["content"]
+        assert result["skill_dir"] == str(skill_dir)
 
     def test_resolves_index_heading_written_as_prefix(self, tmp_path):
         """The skills index groups plugin skills under a ``plugin`` heading; models call

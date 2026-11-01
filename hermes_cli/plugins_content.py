@@ -35,7 +35,8 @@ def register_skill(
 ) -> PluginRegistration:
     """Register a read-only skill resolvable as ``'<plugin_name>:<name>'`` via ``skill_view()``,
     listed by ``skills_list`` and in the system prompt's ``<available_skills>`` while the plugin
-    is enabled. Not copied into ``~/.hermes/skills/``. Raises ``ValueError`` (``':'``/invalid
+    is enabled. Not copied into ``~/.hermes/skills/``. ``path`` names the skill's ``SKILL.md``; a
+    skill directory is normalized to its ``SKILL.md``. Raises ``ValueError`` (``':'``/invalid
     chars) or ``FileNotFoundError``."""
     from agent.skill_utils import _NAMESPACE_RE
     from hermes_cli.plugins_manifest import _portable_slug
@@ -48,7 +49,13 @@ def register_skill(
     # (PluginManifest.path is stored as str); the registry and find_plugin_skill()
     # promise a Path downstream.
     path = Path(path)
-    if not path.exists():
+    if path.is_dir():
+        # A plugin naturally hands over its skill FOLDER (``skills/<name>/``). Registering one used to
+        # "succeed" and then fail on every skill_view() with EISDIR/Errno 13, so normalize to the entry
+        # point; a folder without one falls through to the is_file() refusal below (#147374).
+        candidate = path / "SKILL.md"
+        path = candidate if candidate.is_file() else path
+    if not path.is_file():
         raise FileNotFoundError(f"SKILL.md not found at {path}")
     namespace = _portable_slug(self.manifest.name) if self.manifest.portable else self.manifest.name
     qualified = f"{namespace}:{name}"
