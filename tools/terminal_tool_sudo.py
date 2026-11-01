@@ -16,6 +16,10 @@ import time
 from collections.abc import Callable, Iterator
 from contextvars import ContextVar
 
+# Keywords that end one command and begin the next, shared with approval detection so the two
+# scanners cannot drift: `if true; then sudo ...` and `for i in 1; do sudo ...` are command
+# positions. A keyword only opens one when it stands at a command position itself (see _scan_shell).
+from tools.approval_detection import _SHELL_COMMAND_TRANSITIONS
 from utils import env_var_enabled
 
 # Log-record parity with the origin module.
@@ -88,7 +92,23 @@ def _in_delegated_child_context() -> bool:
         return False
 
 
-_SUDO_HEADLESS_FAILURES = ("sudo: a password is required", "sudo: no tty present", "sudo: a terminal is required")
+# sudo's headless refusals. GNU sudo 1.9 says "a password is required"/"no tty present"/"a terminal
+# is required"; sudo-rs 0.2 (Ubuntu 26.04's default) says "interactive authentication is required"
+# after `sudo -n` and "Authentication required but not attempted" after `sudo -S` with no usable
+# stdin. Matched case-insensitively: sudo-rs capitalises the terminal message.
+_SUDO_HEADLESS_FAILURES = (
+    "sudo: a password is required",
+    "sudo: no tty present",
+    "sudo: a terminal is required",
+    "sudo: interactive authentication is required",
+    "sudo: authentication required but not attempted",
+)
+
+
+def _sudo_needs_a_password(output: str) -> bool:
+    """True when sudo refused for lack of a password or tty — GNU sudo or sudo-rs."""
+    lowered = (output or "").lower()
+    return any(failure in lowered for failure in _SUDO_HEADLESS_FAILURES)
 
 
 def _handle_sudo_failure(output: str, env_type: str) -> str:
@@ -96,7 +116,7 @@ def _handle_sudo_failure(output: str, env_type: str) -> str:
     (gateway session, delegate_task child or `hermes chat -q`); otherwise return *output* as is."""
     is_gateway = env_var_enabled("HERMES_GATEWAY_SESSION")
     no_user = _no_sudo_user()
-    if not (is_gateway or no_user) or not any(f in output for f in _SUDO_HEADLESS_FAILURES):
+    if not (is_gateway or no_user) or not _sudo_needs_a_password(output):
         return output
     from hermes_constants import display_hermes_home as _dhh
     if no_user:
@@ -282,10 +302,19 @@ def _scan_shell(command: str, background: bool = False) -> Iterator[tuple[str, i
     Background mode (compound-background semantics) additionally emits ``escape`` for a bare ``\\x``, ops ``&>``, ``{ `` and a closing
     ``}``, and tracks ``(...)``/``{ ... }`` depth: inside a group nothing is an operator, so
     every non-structural char (whitespace included) surfaces as a single ``skip`` event.
+
+    A command position also opens after a shell keyword that begins a command (``do``, ``then``,
+    ``else``, ``elif``, ``while``, ``until``, ``!`` — ``_SHELL_COMMAND_TRANSITIONS``), after a
+    brace-group ``{``/``}`` wherever it stands, and after the ``)`` that closes a ``case`` pattern:
+    the shell runs a command there, so a rewriter that stops at ``;``/``&&`` alone silently leaves
+    `for i in 1; do sudo ...` un-rewritten.
     """
     i, n = 0, len(command)
     at_start = True
     parens = braces = 0
+    # `case WORD in PATTERN) list ;; ... esac`: the pattern's `)` opens its command list and `;;`
+    # opens the next pattern, so both are command boundaries the flat operators do not cover.
+    case_state = ""  # "" outside a case block, else "head" (after `case`), "pattern", or "body"
     two_char_ops = ("&&", "||", "&>") if background else ("&&", "||", ";;")
     while i < n:
         ch = command[i]
@@ -310,12 +339,29 @@ def _scan_shell(command: str, background: bool = False) -> Iterator[tuple[str, i
         elif background and grouped:
             kind, end = "skip", i + 1
         elif command.startswith(two_char_ops, i):
+            if case_state and command.startswith(";;", i):
+                case_state = "pattern"
             kind, end, at_start = "op", i + 2, True
         elif ch in ";|&()":
-            kind, end, at_start = "op", i + 1, ch != ")"
+            kind, end = "op", i + 1
+            # A subshell's `)` is not a command position; a case pattern's `)` is.
+            at_start = ch != ")" or case_state == "pattern"
+            if ch == ")" and case_state == "pattern":
+                case_state = "body"
         else:
             token, end = _read_shell_token(command, i)
-            kind, at_start = "word", bool(at_start and _looks_like_env_assignment(token))
+            kind = "word"
+            if token == "case":
+                case_state = "head"
+            elif token == "esac":
+                case_state = ""
+            elif token == "in" and case_state == "head":
+                case_state = "pattern"
+            at_start = (
+                bool(at_start and _looks_like_env_assignment(token))
+                or (was_start and token in _SHELL_COMMAND_TRANSITIONS)
+                or token in ("{", "}")
+            )
         yield kind, i, end, was_start
         i = end
 

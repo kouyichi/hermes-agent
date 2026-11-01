@@ -138,6 +138,29 @@ class TestDelegatedChildFailureMessaging:
         assert "To enable sudo over messaging" in out
 
 
+# sudo refuses for the same reasons on GNU sudo 1.9 and on sudo-rs 0.2 (Ubuntu 26.04's default),
+# but says it differently — and sudo-rs capitalises the terminal message. Matching only the GNU
+# strings meant the SUDO_PASSWORD tip never fired on a sudo-rs host (#147525).
+@pytest.mark.parametrize("output", (
+    "sudo: a password is required",
+    "sudo: no tty present and askpass program not specified",
+    "sudo: a terminal is required to authenticate",
+    "sudo: interactive authentication is required",
+    "sudo: A terminal is required to authenticate",
+    "sudo: Authentication required but not attempted",
+))
+def test_the_headless_sudo_tip_fires_for_every_sudo_implementation(output, monkeypatch):
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    out = tts._handle_sudo_failure(output, env_type="local")
+    assert "To enable sudo over messaging" in out
+
+
+def test_unrelated_sudo_output_gets_no_tip(monkeypatch):
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    output = "sudoers: syntax error near line 3"
+    assert tts._handle_sudo_failure(output, env_type="local") == output
+
+
 def test_single_query_never_prompts(monkeypatch):
     """`hermes chat -q` exports HERMES_INTERACTIVE=1 and registers the CLI sudo callback, but never renders the
     panel (a 45 s wait per sudo call for nobody): it is headless, like a delegated child."""

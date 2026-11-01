@@ -1,5 +1,7 @@
 """Regression tests for sudo detection and sudo password handling."""
 
+import pytest
+
 from tools import terminal_tool
 from tools import terminal_tool_sudo
 
@@ -122,3 +124,46 @@ def test_sudo_rewrite_preserves_env_operands_and_prose(monkeypatch):
 def test_count_real_sudo_invocations_ignores_mentions(monkeypatch):
     assert terminal_tool_sudo._count_real_sudo_invocations("grep sudo README.md") == 0
     assert terminal_tool_sudo._count_real_sudo_invocations("sudo a; sudo b") == 2
+
+
+# `do`/`then`/`else`/`elif`/`while`/`until`/`!` and a brace-group `{` all begin a command inside a
+# compound statement, and so does the `)` that closes a `case` pattern. The rewriter only touches
+# command-position words, so a boundary it does not see leaves the `sudo` un-prefixed and un-fed,
+# and the command dies with "sudo: a terminal is required to authenticate" (#147525).
+_COMPOUND_STATEMENT_SUDO = (
+    "for i in 1; do sudo id; done",
+    "while true; do sudo id; break; done",
+    "until false; do sudo id; break; done",
+    "if true; then sudo id; fi",
+    "if false; then :; else sudo id; fi",
+    "case a in a) sudo id;; esac",
+    "f() { sudo id; }",
+    "{ sudo id; }",
+    "! sudo id",
+)
+
+
+@pytest.mark.parametrize("command", _COMPOUND_STATEMENT_SUDO)
+def test_sudo_inside_a_compound_statement_is_rewritten_and_fed_a_password(monkeypatch, command):
+    monkeypatch.setenv("SUDO_PASSWORD", "testpass")
+    monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+
+    transformed, sudo_stdin = terminal_tool_sudo._transform_sudo_command(command)
+
+    assert sudo_stdin == "testpass\n"
+    assert transformed is not None
+    assert transformed.count("sudo -S -p ''") == 1
+    assert transformed.replace(" -S -p ''", "") == command
+
+
+@pytest.mark.parametrize("command", (
+    "echo do sudo x",
+    "for w in a b; do echo $w; done",
+    "case $x in a) echo sudo;; esac",
+    "printf '%s' then sudo",
+))
+def test_a_keyword_outside_a_command_position_does_not_open_one(monkeypatch, command):
+    """`do`/`then` as an argument (or a command word) must not turn the next word into a command."""
+    monkeypatch.setenv("SUDO_PASSWORD", "testpass")
+    assert terminal_tool_sudo._transform_sudo_command(command) == (command, None)
+
