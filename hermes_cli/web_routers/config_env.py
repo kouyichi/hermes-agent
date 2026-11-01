@@ -12,7 +12,7 @@ import time
 import urllib.parse
 from fastapi import APIRouter
 from hermes_cli.web_routers._common import (
-    REDACTED_CREDENTIAL_WRITE_DETAIL, http_failure, is_redacted_credential_preview,
+    REDACTED_CREDENTIAL_WRITE_DETAIL, config_scoped_to_thread, http_failure, is_redacted_credential_preview,
     redacted_credential_preview, scoped_to_thread,
 )
 from hermes_cli.config_backend import refusing_locked_omissions
@@ -859,15 +859,29 @@ def delete_custom_endpoint(endpoint_id: str, profile: Optional[str] = None):
 
 
 @router.post("/api/providers/custom-endpoints/validate")
-async def validate_custom_endpoint(body: CustomEndpointUpdate):
-    """Probe a custom endpoint by calling its OpenAI-compatible /models URL."""
+async def validate_custom_endpoint(body: CustomEndpointUpdate, profile: Optional[str] = None):
+    """Probe a custom endpoint by calling its OpenAI-compatible /models URL.
+
+    A stored credential is probed with: the settings card sends no ``api_key`` once the key lives in
+    ``key_env`` / a ``${VAR}`` ref, and an unauthenticated probe of an endpoint that wants a key reads
+    as a rejected URL (#147501).
+    """
     base_url = (body.base_url or "").strip().rstrip("/")
     if not base_url:
         return {"ok": False, "reachable": True, "message": "Enter an endpoint URL first.", "models": []}
 
     headers = {"Accept": "application/json"}
-    if body.api_key and body.api_key.strip():
-        headers["Authorization"] = f"Bearer {body.api_key.strip()}"
+    api_key = (body.api_key or "").strip()
+    if not api_key:
+        try:
+            api_key = await config_scoped_to_thread(profile, lambda: _stored_endpoint_probe_key(body.id, base_url))
+        except (OSError, ValueError, RuntimeError) as exc:
+            # A broken config or an unscoped secret only costs the probe its credential: the user
+            # still gets reachability + the endpoint's own 401 instead of a 500 on Test.
+            _log.debug("custom endpoint validate: no stored credential for %r: %s", body.id, exc)
+            api_key = ""
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     resolved, resp = await _probe_openai_compatible_models(base_url, headers)
     if resp is None:
@@ -930,28 +944,78 @@ def _no_models_probe_message(resp: Any, base_url: str) -> str:
             "Start a model on that endpoint and try again.")
 
 
+def _stored_endpoint_probe_key(endpoint_id: str, base_url: str) -> str:
+    """The credential an existing custom endpoint already holds, for re-probing its own URL.
+
+    The settings card sends no ``api_key`` once the key lives in ``key_env`` (a Save writes it to
+    ``.env``) or in a hand-written ``${VAR}``, so the probe went out unauthenticated and a healthy
+    endpoint that wants a key answered 401 (#147501). Only the endpoint's OWN url gets its secret
+    back: a URL the user is typing is not yet trusted with an existing credential. A ``key_cmd``
+    credential is deliberately not run here — a diagnostic probe does not execute the user's command.
+    """
+    if not endpoint_id:
+        return ""
+    from hermes_cli.route_identity import normalize_route_base_url
+    from agent.secret_scope import get_secret_str
+
+    cfg = load_config()
+    _stored, entry = _resolve_custom_endpoint_entry(cfg.get("providers"), endpoint_id)
+    if not isinstance(entry, dict):
+        # A legacy ``custom_providers:`` row is listed under its slug and is still routed at runtime.
+        slug = _custom_endpoint_id(endpoint_id)
+        entry = next((e for e in get_compatible_custom_providers(cfg)
+                      if not e.get("provider_key")
+                      and _custom_endpoint_id(str(e.get("name") or "")) == slug), None)
+    if not isinstance(entry, dict):
+        return ""
+    stored_url = entry.get("base_url") or entry.get("url") or entry.get("api")
+    if normalize_route_base_url(stored_url) != normalize_route_base_url(base_url):
+        return ""
+    key_env = str(entry.get("key_env") or entry.get("api_key_env") or "").strip()
+    return (get_secret_str(key_env, "").strip() if key_env else "") or str(entry.get("api_key") or "").strip()
+
+
 async def _probe_openai_compatible_models(base_url: str, headers: Optional[dict]) -> tuple[str, Any]:
     """GET ``{base}/models``, then ``{base}/v1/models`` (or the ``/v1``-stripped variant) when the
     first answers a non-success. Returns ``(resolved_base_url, response)`` — the base that served the
     model list is what the caller must PERSIST: the runtime appends ``/chat/completions`` to the saved
     URL verbatim, so a bare host root that only "detected" via ``/v1/models`` would 404 every chat
-    (#65488). ``response`` is None when no candidate could be reached at all."""
+    (#65488). ``response`` is None when no candidate could be reached at all, and when neither serves
+    a model list it is the best-ranked one (``_probe_answer_rank``), not simply the last."""
     base = base_url.rstrip("/")
     alternate = base[:-3].rstrip("/") if base.lower().endswith("/v1") else base + "/v1"
-    resolved, resp = base, None
+    resolved, resp, best_rank = base, None, -1
     async with _endpoint_probe_client(base, 8.0) as client:
-        for candidate in (base, alternate):
+        for typed, candidate in ((True, base), (False, alternate)):
             try:
                 candidate_resp = await client.get(candidate + "/models", headers=headers)
             except Exception:
                 continue
-            # Keep the most telling failure: a 401/403 from the /v1 alternate says "server is
-            # there, key rejected", which beats the typed root's 404 (wrong path).
-            if resp is None or candidate_resp.is_success or resp.status_code == 404:
-                resolved, resp = candidate, candidate_resp
-            if candidate_resp.is_success:
+            rank = _probe_answer_rank(candidate_resp, typed=typed)
+            if rank > best_rank:
+                resolved, resp, best_rank = candidate, candidate_resp, rank
+            if rank == _PROBE_SERVED_MODELS:
                 break
     return resolved, resp
+
+
+_PROBE_SERVED_MODELS = 3
+
+
+def _probe_answer_rank(resp: Any, *, typed: bool) -> int:
+    """How telling one candidate's ``/models`` answer is; the best-ranked answer is the verdict.
+
+    A model list is the only answer that proves a working OpenAI-compatible endpoint, so it wins
+    outright. An auth rejection comes next — it names the credential, which is the user's to fix.
+    Otherwise the URL the user typed outranks the ``/v1``-swapped fallback: that fallback's 200 can be
+    a web UI catch-all answering HTML for every route, and reporting it ("returned text/html …") names
+    a URL that is not in the config while hiding the real answer (#147501).
+    """
+    if resp.is_success and _parse_model_entries(resp):
+        return _PROBE_SERVED_MODELS
+    if resp.status_code in (401, 403):
+        return 2
+    return 1 if typed else 0
 
 
 _TRANSPORT_ROUTES = {"chat_completions": "/chat/completions", "codex_responses": "/responses",
