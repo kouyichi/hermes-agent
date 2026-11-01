@@ -3103,10 +3103,10 @@ def _save_compose_deliver(
     # Not a substring check: bare "SILENT"/"NO_REPLY" or a report quoting "[SILENT]" must
     # not be swallowed; bracketed-prefix / trailing-line tolerance is kept.
     if d.should_deliver and d.success and _is_cron_silence_response(deliver_content):
-        # Cron silence suppression — see _is_cron_silence_response. Replaces the old `SILENT_MARKER in
-        # ...upper()` substring check, which both leaked bracketless near-markers ("SILENT" / "NO_REPLY")
-        # and wrongly swallowed a real report that merely quoted "[SILENT]" mid-sentence (#51438, #46917).
-        logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
+        # Cron silence suppression — see _is_cron_silence_response. Replaces an earlier `SILENT_MARKER in
+        # ...upper()` substring check that leaked bracketless markers and swallowed quoted reports (#51438, #46917).
+        from gateway.response_filters import near_miss_silence_marker
+        logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], near_miss_silence_marker(deliver_content) or SILENT_MARKER)
         d.should_deliver = False
 
     if d.should_deliver and fence.lost():

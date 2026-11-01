@@ -43,7 +43,7 @@ from gateway.platforms.webhook_coalesce import WebhookCoalescer, validate_coales
 from gateway.platforms.webhook_filters import DEFAULT_SCRIPT_TIMEOUT_SECONDS, WebhookRouteProcessor
 from gateway.platforms.webhook_mcp_events import (
     handle_mcp_event_control, mcp_event_delivery_id, render_mcp_event_prompt)
-from gateway.response_filters import is_autonomous_silence_response
+from gateway.response_filters import is_autonomous_silence_response, near_miss_silence_marker
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +322,9 @@ class WebhookAdapter(BasePlatformAdapter):
         # first/last line), because models add a sentence explaining why they stayed quiet, which the
         # interactive exact-match rule would deliver.
         if is_autonomous_silence_response(content):
-            logger.info("[webhook] Response for %s is a silence marker — not delivering", chat_id)
+            near_miss = near_miss_silence_marker(content)
+            logger.info("[webhook] Response for %s is a silence marker%s — not delivering", chat_id,
+                        f" near-miss {near_miss!r}" if near_miss else "")
             return SendResult(success=True)
         from gateway.platforms.webhook_delivery import retained_destination
         try:

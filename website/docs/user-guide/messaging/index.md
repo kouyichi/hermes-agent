@@ -144,6 +144,11 @@ Supported tokens:
 
 Whitespace and case are normalized, but the whole final response must be the token. A sentence like "Use `[SILENT]` when nothing changed" is delivered normally.
 
+The autonomous lanes — a scheduled (cron) job, a webhook response — have no human reader waiting, so they are
+looser: the token may open the response (`[SILENT] nothing new this tick`), sit on its own first or last line
+(`2 deals filtered` then `[SILENT]`), or be one typo away from a supported token (`[SLIENT]`, `NO-REPLY`). A
+token that appears mid-sentence is still treated as a report.
+
 Silence is a delivery decision only. Hermes keeps the assistant silence turn in the session transcript, so the conversation still alternates normally:
 
 ```text

@@ -28,6 +28,12 @@ _BRACKETED_SILENCE_MARKERS = tuple(
     sorted(m for m in LIVE_GATEWAY_SILENT_MARKERS if m.startswith("["))
 )
 
+# How far the autonomous lane's near-miss tolerance reaches: one edit (insertion, deletion,
+# substitution, or one adjacent transposition — the shape a typo actually takes). ASCII markers only,
+# because a two-character CJK marker puts ordinary words one edit away (``静音`` vs ``静默``).
+_MARKER_FUZZY_EDIT_BOUND = 1
+_FUZZY_SILENCE_MARKERS = tuple(sorted(m for m in LIVE_GATEWAY_SILENT_MARKERS if m.isascii()))
+
 # The persisted user-row kind of a self-injected MessageEvent(internal=True) turn; only these
 # machinery kinds may vanish on a bare silence marker.
 INTERNAL_NOTIFICATION_DISPLAY_KIND = "internal_notification"
@@ -145,6 +151,52 @@ class SilenceMarkerStreamHold:
         return out
 
 
+def _marker_edit_distance(a: str, b: str) -> int:
+    """Optimal-string-alignment distance: insertion, deletion, substitution, adjacent transposition.
+
+    Transposition is ONE edit here on purpose: the observed leak was ``[SLIENT]``, and plain Levenshtein
+    scores that swap as two edits, so it would never reach the bound.
+    """
+    previous_previous: list[int] = []
+    previous = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, start=1):
+        current = [i]
+        for j, char_b in enumerate(b, start=1):
+            best = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (char_a != char_b))
+            if i > 1 and j > 1 and char_a == b[j - 2] and a[i - 2] == char_b:
+                best = min(best, previous_previous[j - 2] + 1)
+            current.append(best)
+        previous_previous, previous = previous, current
+    return previous[-1]
+
+
+def near_miss_silence_marker(response: Any) -> Optional[str]:
+    """The known marker ``response`` is one edit away from, or ``None``.
+
+    A model that mistypes the sentinel (``[SLIENT]``) still chose silence, so the autonomous lane reads
+    one edit of it as silence instead of delivering the token to the chat (#147526). Only the same shapes
+    the exact rule already accepts are judged — the whole response, or its own first or last line — and
+    the edit bound keeps the rule marker-shaped: two strings one edit apart differ in length by at most
+    one, so ordinary prose cannot reach a 6-8 character marker. The returned text is the swallowed
+    original, for the delivery log.
+
+    Fuzzy matching is ASCII-only. The CJK markers are two characters, which puts ordinary words within
+    one edit (``静音``, "mute", is one edit from ``静默``), so those stay exact-match.
+    """
+    stripped = response.strip() if isinstance(response, str) else ""
+    if not stripped:
+        return None
+    lines = [ln for ln in stripped.splitlines() if ln.strip()]
+    for candidate in dict.fromkeys((stripped, lines[0], lines[-1])):
+        for form in _canonical_silence_candidates(candidate):
+            if not form.isascii():
+                continue
+            for marker in _FUZZY_SILENCE_MARKERS:
+                if form != marker and _marker_edit_distance(form, marker) <= _MARKER_FUZZY_EDIT_BOUND:
+                    return candidate.strip()
+    return None
+
+
 def is_autonomous_silence_response(response: Any) -> bool:
     """Loose silence matcher for autonomous lanes (cron, webhook).
 
@@ -153,6 +205,8 @@ def is_autonomous_silence_response(response: Any) -> bool:
     first/last line or the bracketed sentinel opens the response (``[SILENT] No
     changes detected``).  A token buried mid-sentence is still delivered.
     Shares :data:`LIVE_GATEWAY_SILENT_MARKERS` so the two sets cannot drift.
+    A marker typed one edit off (``[SLIENT]``) counts too — see
+    :func:`near_miss_silence_marker`, which is autonomous-lane only.
     """
     stripped = response.strip() if isinstance(response, str) else ""
     if not stripped:
@@ -163,7 +217,7 @@ def is_autonomous_silence_response(response: Any) -> bool:
     # be suppressed in chat yet delivered by cron.
     return stripped.upper().startswith(_BRACKETED_SILENCE_MARKERS) or any(
         is_intentional_silence_response(c) for c in (stripped, lines[0], lines[-1])
-    )
+    ) or near_miss_silence_marker(stripped) is not None
 
 
 def is_intentional_silence_agent_result(agent_result: dict | None, response: Any) -> bool:
