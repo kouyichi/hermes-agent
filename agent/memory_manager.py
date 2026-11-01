@@ -232,6 +232,9 @@ class MemoryManager:
         }
         # The profile ``initialize_all`` bound the providers to; tool calls must come from it (#140058).
         self._bound_scope: Optional[dict[str, Any]] = None
+        # Why ``initialize_all`` dropped a provider (name -> error text), read by the startup warning so
+        # an ``initialize()`` failure is not reported as a profile conflict (#147383).
+        self._init_drop_reasons: dict[str, str] = {}
         self._tool_call_keywords_cache: dict[int, Optional[frozenset[str]]] = {}
 
     def _each_provider(self, label: str, call: Callable[[MemoryProvider], Any], *, level: int = logging.DEBUG,
@@ -265,6 +268,27 @@ class MemoryManager:
         self._providers = [p for p in self._providers if p is not provider]
         self._tool_to_provider = {t: p for t, p in self._tool_to_provider.items() if p is not provider}
         self._has_external = any(p.name != "builtin" for p in self._providers)
+
+    def _initialize_or_drop(self, provider: MemoryProvider, session_id: str, **kwargs: Any) -> None:
+        """``initialize()`` one provider, dropping it if it raises: a provider whose ``initialize()``
+        failed partway is half-built, so every later hook and tool call would reach an attribute its body
+        never assigned — the whole process lifetime, with no retry (#147383)."""
+        try:
+            provider.initialize(session_id=session_id, **kwargs)
+        except Exception as e:
+            logger.warning("Memory provider '%s' initialize failed: %s", provider.name, e, exc_info=True)
+            self._init_drop_reasons[provider.name] = str(e)
+            self._release_and_drop(provider)
+
+    def _release_and_drop(self, provider: MemoryProvider) -> None:
+        """Best-effort ``shutdown()`` so a lease or connection the partial initialize took is released,
+        then removal from the roster (tools and hooks included)."""
+        try:
+            provider.shutdown()
+        except Exception as e:
+            logger.debug("Memory provider '%s' shutdown after a failed initialize raised: %s",
+                         provider.name, e, exc_info=True)
+        self._drop_provider(provider)
 
     def add_provider(self, provider: MemoryProvider) -> None:
         """Register a provider; builtin always accepted, only ONE external allowed."""
@@ -905,16 +929,24 @@ class MemoryManager:
 
     def initialize_for_agent(self, say: Optional[Callable[[str], None]] = None, **kwargs) -> bool:
         """``initialize_all`` for an agent build; True while an external provider is still served. One
-        refused as another profile's shared instance is dropped, and ``say`` (the agent's startup
-        warning sink) tells the user this profile now runs without it."""
+        refused as another profile's shared instance is dropped, as is one whose ``initialize()`` raised;
+        ``say`` (the agent's startup warning sink) tells the user this profile now runs without it."""
         before = [p for p in self._providers if p.name != "builtin"]
         self.initialize_all(**kwargs)
         for provider in (p for p in before if not any(p is kept for kept in self._providers)):
-            message = (f"⚠ Memory provider {provider.name!r} is disabled for this profile: it handed out the "
-                       "provider instance another profile already uses. Built-in memory still works; the "
-                       "operator can see why with `hermes logs errors`.")
-            (say or logger.warning)(message)
+            (say or logger.warning)(self._disabled_provider_message(provider))
         return self._has_external
+
+    def _disabled_provider_message(self, provider: MemoryProvider) -> str:
+        """Why the startup warning dropped ``provider``: a failed ``initialize()`` (named with its error)
+        is not the profile-conflict case the other copy describes (#147383)."""
+        reason = self._init_drop_reasons.get(provider.name)
+        if reason:
+            return (f"⚠ Memory provider {provider.name!r} failed to initialize and is disabled: {reason}. "
+                    "Built-in memory still works; the operator can see why with `hermes logs errors`.")
+        return (f"⚠ Memory provider {provider.name!r} is disabled for this profile: it handed out the "
+                "provider instance another profile already uses. Built-in memory still works; the "
+                "operator can see why with `hermes logs errors`.")
 
     def initialize_all(self, session_id: str, **kwargs) -> None:
         """Initialize all providers, injecting ``hermes_home`` so they resolve profile-scoped paths."""
@@ -922,9 +954,10 @@ class MemoryManager:
             from hermes_constants import get_hermes_home
             kwargs["hermes_home"] = str(get_hermes_home())
         self._bound_scope = bound_scope(kwargs["hermes_home"], kwargs.get("agent_identity"))
+        self._init_drop_reasons = {}
         # One instance, one profile: never rebind an instance another profile's manager bound (#140058).
         for provider in [p for p in self._providers if p.name != "builtin"]:
             if not claim_instance(provider, kwargs["hermes_home"]):
                 self._drop_provider(provider)
-        self._each_provider("initialize failed", lambda p: p.initialize(session_id=session_id, **kwargs),
-                            level=logging.WARNING)
+        for provider in list(self._providers):
+            self._initialize_or_drop(provider, session_id, **kwargs)
