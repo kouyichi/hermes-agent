@@ -33,8 +33,8 @@ from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS
 from hermes_cli.dashboard_auth.refresh_singleflight import refresh_session_coalesced
 from hermes_cli.dashboard_auth.request_utils import (
     access_token_max_age as _expires_in_seconds, client_ip as _client_ip,
-    cookie_origin_is_allowed, extract_bearer as _extract_bearer, is_safe_next_path,
-    scan_session_providers, unreachable_response)
+    cookie_origin_is_allowed, extract_access_token as _extract_access_token,
+    is_safe_next_path, scan_session_providers, unreachable_response)
 
 _log = logging.getLogger(__name__)
 
@@ -159,7 +159,7 @@ def peek_session(request: Request):
     checks (Webapp sign-in binding, bearers only a native app was given) and none of its side
     effects: no refresh, no cookie writes, no audit records, no 401. A public route uses it to
     decide how much to show; an expired or unverifiable session reads as signed out."""
-    bearer = _extract_bearer(request)
+    bearer = _extract_access_token(request)
     if bearer:
         if not webapp_sign_in.token_works_alone(request, bearer):
             return None
@@ -222,12 +222,14 @@ async def gated_auth_middleware(
     cookie_logout = own_origin and request.url.path == "/auth/logout"
     if _path_is_public(request.url.path) and not cookie_logout:
         return await call_next(request)
-    # RFC 8252 native-app bearer path: the same provider-minted access token the cookie flow
-    # stores, verified with the same provider stack, no cookie read or set. A presented-but-
-    # invalid bearer gets the structured 401 so the desktop refreshes/re-logs instead of
-    # following a cookie redirect. On the gateway's Webapp only tokens it gave a native app's
-    # sign-in work here: a browser login's tokens work only as its cookies, which sign-out ends.
-    bearer = _extract_bearer(request)
+    # RFC 8252 native-app bearer path (and the Desktop's token-mode REST header, resolved by
+    # ``extract_access_token``: the same credential in the transport each client uses): the same
+    # provider-minted access token the cookie flow stores, verified with the same provider stack, no
+    # cookie read or set. A presented-but-invalid token gets the structured 401 so the desktop
+    # refreshes/re-logs instead of following a cookie redirect. On the gateway's Webapp only tokens
+    # it gave a native app's sign-in work here: a browser login's tokens work only as its cookies,
+    # which sign-out ends. Gated mode never compares either shape with ``_SESSION_TOKEN``.
+    bearer = _extract_access_token(request)
     if bearer:
         if cookie_logout:
             return await call_next(request)

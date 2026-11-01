@@ -132,6 +132,44 @@ class TestWsUpgradeLeg:
         assert credential == "none"
 
 
+class TestDesktopSessionTokenHeaderLeg:
+    """The Desktop's REST credential for a token-mode Remote gateway.
+
+    ``apps/desktop/electron/connection-config.ts`` documents the split: REST sends the stored
+    token in ``X-Hermes-Session-Token``, the WS upgrade bakes it into ``?token=``. The socket
+    leg is pinned above; the REST leg accepted only ``Authorization``, so the same token
+    authenticated the socket and 401'd every REST call (roster, session history) with
+    ``reason=no_cookie``. The header is the loopback gate's own credential shape
+    (``web_server._has_valid_session_token``), so a token-mode Desktop presents the same one
+    on both listeners.
+    """
+
+    def _me(self, client, headers):
+        return client.get("/api/auth/me", headers=headers)
+
+    def test_desktop_header_passes_the_gate(self, gated_token_app, token):
+        r = self._me(gated_token_app, {"X-Hermes-Session-Token": token})
+        assert r.status_code == 200, (r.status_code, r.text)
+        assert r.json().get("provider") == "session-token"
+
+    def test_foreign_header_token_is_401(self, gated_token_app, token):
+        r = self._me(gated_token_app, {"X-Hermes-Session-Token": secrets.token_urlsafe(32)})
+        assert r.status_code == 401
+
+    def test_the_legacy_static_token_never_grants_gated_access(self, gated_token_app):
+        """The header must be provider-verified, never compared with ``_SESSION_TOKEN``: a
+        leaked in-process constant opens nothing behind the gate."""
+        assert web_server._SESSION_TOKEN
+        r = self._me(gated_token_app, {"X-Hermes-Session-Token": web_server._SESSION_TOKEN})
+        assert r.status_code == 401
+
+    def test_the_header_and_the_bearer_name_the_same_principal(self, gated_token_app, token):
+        by_header = self._me(gated_token_app, {"X-Hermes-Session-Token": token})
+        by_bearer = self._me(gated_token_app, {"Authorization": f"Bearer {token}"})
+        assert by_header.status_code == by_bearer.status_code == 200
+        assert by_header.json() == by_bearer.json()
+
+
 # ---------------------------------------------------------------------------
 # Login surfaces never select a provisioned-credential provider (review P1)
 # ---------------------------------------------------------------------------

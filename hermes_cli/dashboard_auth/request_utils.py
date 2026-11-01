@@ -35,6 +35,22 @@ def extract_bearer(request: Request) -> str:
     return ""
 
 
+#: The Desktop's REST credential for a token-mode Remote gateway connection: it sends the stored
+#: session token here instead of ``Authorization`` (``apps/desktop/electron/connection-config.ts``
+#: — "REST uses an ``X-Hermes-Session-Token`` header; WS uses ``?token=``"). It is the shape the
+#: loopback gate already reads (``web_server._has_valid_session_token``), while the WS upgrade
+#: carries the same token in ``?token=`` (``web_server_chat._ws_auth_reason``).
+SESSION_TOKEN_HEADER = "X-Hermes-Session-Token"
+
+
+def extract_access_token(request: Request) -> str:
+    """The presented user session access token — the ``Authorization`` header's value, else the
+    Desktop's :data:`SESSION_TOKEN_HEADER`. One resolver for both transports, so a verifier cannot
+    accept one and refuse the other (#147387: the same token authenticated the socket and 401'd
+    REST)."""
+    return extract_bearer(request) or request.headers.get(SESSION_TOKEN_HEADER, "").strip()
+
+
 def _http_origin(value: str) -> tuple[str, str, int] | None:
     """Parse one serialized HTTP origin, never an opaque or URL-like origin."""
     if not value or any(ord(c) <= 32 or ord(c) >= 127 or c in "\\,?#%" for c in value):
