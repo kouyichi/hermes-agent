@@ -18,6 +18,7 @@ from typing import Any, NoReturn, Optional
 from hermes_constants import get_hermes_home, hermes_home_key
 from hermes_cli.config import cfg_get
 from hermes_cli.plugin_capabilities import _child_dict
+from hermes_cli.plugins_discovery import skips_plugin_child
 # Tests patch these two on the facade; the install/remove siblings read them through it.
 from hermes_cli.secret_prompt import masked_secret_prompt
 from utils import rmtree_readonly
@@ -865,7 +866,9 @@ def _scan_level(base: Path, source: str, skip_names: set, prefix: str, depth: in
         return
     for d in children:
         try:
-            if not d.is_dir() or (depth == 0 and skip_names and d.name in skip_names):
+            if not d.is_dir() or skips_plugin_child(d.name, depth) or (
+                depth == 0 and skip_names and d.name in skip_names
+            ):
                 continue
             info = _read_manifest_info(d, prefix)
         except (OSError, PluginOperationError) as exc:

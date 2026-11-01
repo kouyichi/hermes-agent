@@ -138,6 +138,18 @@ def is_skipped_plugin_dir(name: str) -> bool:
     return (name.startswith("__") and name.endswith("__")) or name in _FOREIGN_HARNESS_MANIFEST_DIRS
 
 
+def skips_plugin_child(name: str, depth: int = 0) -> bool:
+    """True for a child directory a scan at *depth* must not read (0 = a plugins root's own level).
+
+    A dot-prefixed top-level dir under a plugins root is a plugin transaction's staging area: install
+    clones into ``.install-*``, update into ``.update-*`` and remove into ``.<name>.remove-*``, all
+    minted inside the scanned dir and each holding a COMPLETE plugin tree one level down. Scanning one
+    registers the plugin mid-install as a second copy (#147455), which is why the provenance walk
+    already skips dot dirs the same way. Deeper dot dirs stay scannable: a multi-harness repo keeps its
+    real Hermes manifest in ``<plugin>/.hermes-plugin/``."""
+    return is_skipped_plugin_dir(name) or (depth == 0 and name.startswith("."))
+
+
 def scan_directory(
     path: Path, source: str, *, skip_names: Optional[set[str]] = None, prefix: str = "", depth: int = 0
 ) -> list[PluginManifest]:
@@ -154,8 +166,8 @@ def scan_directory(
         logger.warning("Skipping unreadable plugin directory %s: %s", path, exc)
         return manifests
     for child in children:
-        if is_skipped_plugin_dir(child.name):
-            logger.debug("Skipping %s (dunder or foreign-harness manifest dir)", child)
+        if skips_plugin_child(child.name, depth):
+            logger.debug("Skipping %s (dunder, foreign-harness or staging dir)", child)
             continue
         # pathlib.Path.is_dir() swallows OSError, but injected Path-likes
         # and test doubles can still raise. Fail closed per child.
