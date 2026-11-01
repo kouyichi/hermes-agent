@@ -4731,20 +4731,14 @@ Write only the summary body. Do not include any preamble or prefix."""
         same filter pair as ``_find_last_user_message_idx``, so an idle session
         whose only user-role row is an inherited summary yields ``None`` and is
         never re-animated (#80622).
+
+        A runtime-injected notice (background wake, hidden scaffolding) opens a
+        turn no human asked for: what follows answers IT, so an already
+        delivered reply before it still means the ask is done (#147339).
         """
         from agent.conversation_compression import _is_real_user_message
 
         last_user_idx = -1
-        # Find the newest user message that carries at least one image part. We anchor on image-bearing user
-        # messages (not all user messages) so a plain text follow-up after a big-image turn still strips the
-        # old image — matching the problem kilocode#9434 set out to solve.
-        # Newest tool message carrying an image. Tool-result images (``vision_analyze``,
-        # screenshot-returning tools) accumulate on their own timeline and the user anchor never protects
-        # the stale ones: a session whose only image-bearing user message is the FIRST one leaves ``anchor
-        # <= 0`` and strips nothing at all, so twenty tool results keep multi-MB of base64 in every request
-        # body until the provider answers 413 -- and the 413 handler's recovery compaction lands right back
-        # here and frees nothing, which is the wedge in #89938. Keep the newest tool image, since that is
-        # the one the model is reasoning about, and drop every older one wherever it sits.
         for i in range(len(messages) - 1, -1, -1):
             msg = messages[i]
             # _is_real_user_message also rejects metadata-flagged scaffolding
@@ -4761,7 +4755,11 @@ Write only the summary body. Do not include any preamble or prefix."""
         if last_user_idx < 0:
             return None
 
-        for msg in reversed(messages[last_user_idx + 1:]):
+        # A notice row opens a turn nobody asked for: rows after it answer IT (#147339).
+        tail = messages[last_user_idx + 1:]
+        note = next((i for i, m in enumerate(tail) if isinstance(m, dict) and m.get("role") == "user"
+                     and m.get("display_kind") not in (None, STEER_DISPLAY_KIND)), len(tail))
+        for msg in reversed(tail[:note]):
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
                 # Trailing tool result (or anything else): still mid-task.
                 break

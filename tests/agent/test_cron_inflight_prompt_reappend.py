@@ -413,3 +413,88 @@ def test_replay_replaces_surviving_user_row_with_same_message_uid():
         if msg.get("tool_calls"):
             ids = [c["id"] for c in msg["tool_calls"]]
             assert [m.get("tool_call_id") for m in compressed[i + 1 : i + 1 + len(ids)]] == ids, i
+
+
+# ---------------------------------------------------------------------------
+# #147339 — a runtime-injected notice opens a turn nobody asked for
+# ---------------------------------------------------------------------------
+
+
+def _answered_ask_then_notice() -> list[dict[str, Any]]:
+    """Ask A, A's final reply, then a background notice the runtime wrote itself."""
+    return [
+        {"role": "system", "content": "You are Hermes."},
+        {"role": "user", "content": JOB_SENTINEL},
+        {"role": "assistant", "content": "Digest written. Nothing else to do."},
+        {
+            "role": "user",
+            "content": "Background job B completed.",
+            "display_kind": "internal_notification",
+        },
+    ]
+
+
+def test_completed_turn_before_an_internal_notice_is_not_in_flight():
+    """#147339: the notice is not human input, so the answer scan must reach A's
+    final reply instead of stopping on the notice row (which made A replayable
+    even though the summary said it was finished)."""
+    messages = _answered_ask_then_notice()
+    assert ContextCompressor._find_inflight_user_task(messages) is None
+    # Control: the same transcript without the notice already answers ``None``.
+    assert ContextCompressor._find_inflight_user_task(messages[:3]) is None
+
+
+def test_notice_handling_tool_round_does_not_revive_a_completed_turn():
+    """The assistant may already be working on the notice (tool_calls + result).
+    Rows after the notice answer IT, so they cannot keep A in flight."""
+    messages = [
+        *_answered_ask_then_notice(),
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "n1", "function": {"name": "read_file", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "n1", "content": "notice payload"},
+    ]
+    assert ContextCompressor._find_inflight_user_task(messages) is None
+
+
+def test_unanswered_ask_before_a_notice_is_still_in_flight():
+    """Negative control: an ask that never got its reply stays in flight — the
+    notice boundary must not hide unfinished human work."""
+    messages = [
+        {"role": "system", "content": "You are Hermes."},
+        {"role": "user", "content": JOB_SENTINEL},
+        {
+            "role": "user",
+            "content": "Background job B completed.",
+            "display_kind": "internal_notification",
+        },
+    ]
+    found = ContextCompressor._find_inflight_user_task(messages)
+    assert found is not None
+    assert JOB_SENTINEL in _text(found)
+
+
+def test_notice_after_a_finished_exchange_is_not_replayed_by_compaction():
+    """End to end: compaction must not restate a finished ask as the active
+    request because a background notice arrived after its answer."""
+    messages = [
+        *_cron_transcript(),
+        {"role": "assistant", "content": "Digest written. Nothing else to do."},
+        {
+            "role": "user",
+            "content": "Background job B completed.",
+            "display_kind": "internal_notification",
+        },
+    ]
+    compressed = _compress(messages)
+
+    idx = _handoff_idx(compressed)
+    assert idx >= 0, "expected a compaction handoff in the compressed transcript"
+    after = compressed[idx + 1:]
+    assert not any(
+        JOB_SENTINEL in _text(m) for m in _actionable_user_rows(after)
+    ), "an answered ask was restated as the active request (#147339)"
+    carrier_tail = _text(compressed[idx]).split(_SUMMARY_END_MARKER)[-1]
+    assert JOB_SENTINEL not in carrier_tail
