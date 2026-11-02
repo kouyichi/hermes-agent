@@ -30,6 +30,9 @@ def test_boot_hook_and_prompt_hand_the_prune_to_one_child(scratch_prune_spawns, 
     home = tmp_path / "launch"
     monkeypatch.setenv("HERMES_HOME", str(home))
     scratch = home / "cache" / "scratch"
+    # A real Hermes process has the boot hook's TMPDIR in force; this test's runner redirects it to a
+    # pytest temp root, and the prompt names whichever temp dir actually wins (#147309).
+    monkeypatch.setenv("TMPDIR", str(scratch))
     env = {"HERMES_HOME": str(home)}
     assert apply_scratch_tmp_env(env) is True
     hints = _local_host_hints()

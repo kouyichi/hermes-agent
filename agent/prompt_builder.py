@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from hermes_constants import (
+    SCRATCH_TMP_ENV_VARS,
     get_hermes_home, get_scratch_dir, get_skills_dir, is_wsl, reset_hermes_home_override, set_hermes_home_override,
 )
 
@@ -902,6 +903,24 @@ def _clear_backend_probe_cache() -> None:
     _BACKEND_PROBE_CACHE.clear()
 
 
+def _scratch_hint_line() -> str:
+    """The prompt's temporary-directory line, honest about a user-set temp var.
+
+    Hermes points ``TMPDIR``/``TMP``/``TEMP`` at :func:`get_scratch_dir` at boot but never
+    overrides a value the user set, so naming the scratch dir as TMPDIR when the user exported
+    their own temp volume (``terminal.temp_dir``) sends probes to the wrong filesystem (#147309).
+    Name whichever directory actually wins; the 24h-prune note only holds for the scratch dir.
+    """
+    scratch = get_scratch_dir()
+    effective = next((os.environ[key].strip() for key in SCRATCH_TMP_ENV_VARS
+                      if os.environ.get(key, "").strip()), "")
+    if effective and os.path.realpath(effective) != os.path.realpath(scratch):
+        return (f"Temporary directory: {effective} (TMPDIR points here; write temporary files and probes "
+                "there, never under the system temp dir)")
+    return (f"Scratch directory: {scratch} (TMPDIR points here; write temporary files "
+            "and probes there, never under the system temp dir; entries idle for 24h are pruned)")
+
+
 def _local_host_hints() -> list[str]:
     """Host OS / home / cwd block for a local terminal backend (tools run on this host)."""
     import platform
@@ -918,10 +937,10 @@ def _local_host_hints() -> list[str]:
     except OSError:
         pass
     # The model reaches for the system temp dir by reflex (tmpfs on most Linux hosts, fills RAM);
-    # naming Hermes' scratch dir here is what makes the TMPDIR export a habit rather than a hidden default.
+    # naming where temporary files belong here is what makes the TMPDIR export a habit rather than
+    # a hidden default. It must name the directory that actually wins: a user-set temp var is kept.
     try:
-        host_lines.append(f"Scratch directory: {get_scratch_dir()} (TMPDIR points here; write temporary files "
-                          "and probes there, never under the system temp dir; entries idle for 24h are pruned)")
+        host_lines.append(_scratch_hint_line())
     except OSError:
         pass
     if not (sys.platform == "win32" and not is_wsl()):
