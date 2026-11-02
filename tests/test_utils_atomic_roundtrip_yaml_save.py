@@ -210,6 +210,40 @@ class TestAtomicRoundtripYamlSave:
         result = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert result["toolsets"] == ["three"]
 
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    def test_shifted_list_entry_keeps_its_quoting(self, config_path, quote):
+        """#147594: an entry that only MOVED keeps its presentation across the rewrite.
+
+        Removing the first item and re-inserting it rebuilds the list, so the survivor is appended
+        at the tail — where there is no earlier node to inherit a style from — and came back plain.
+        """
+        config_path.write_text(
+            "marker: keep\n"
+            "skills:\n"
+            "  external_dirs:\n"
+            f"    - {quote}skills/codebase-design{quote}\n"
+            f"    - {quote}skills/test-pilot{quote}\n",
+            encoding="utf-8",
+        )
+
+        from utils import atomic_roundtrip_yaml_save
+
+        atomic_roundtrip_yaml_save(
+            config_path, {"marker": "keep", "skills": {"external_dirs": ["skills/test-pilot"]}}
+        )
+        atomic_roundtrip_yaml_save(
+            config_path,
+            {"marker": "keep", "skills": {"external_dirs": ["skills/codebase-design", "skills/test-pilot"]}},
+        )
+
+        text = config_path.read_text(encoding="utf-8")
+        assert f"    - {quote}skills/test-pilot{quote}\n" in text
+        assert "    - skills/test-pilot\n" not in text
+        assert yaml.safe_load(text)["skills"]["external_dirs"] == [
+            "skills/codebase-design",
+            "skills/test-pilot",
+        ]
+
     def test_recurses_into_nested_dicts(self, config_path):
         """Deep mutations target the matching subtree, not the whole parent.
 

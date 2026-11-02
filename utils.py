@@ -615,6 +615,22 @@ def _rt_value(value: Any) -> Any:
     return value
 
 
+def _rt_restyled(value: str, template: Any) -> Any:
+    """``value`` wearing ``template``'s quoting style, as a FRESH node.
+
+    ``_rt_value`` first, so the YAML 1.1 ambiguous-word guard above still wins; the template only
+    contributes presentation. A block literal (``|``/``>``) is not inherited — that is a style an
+    inline list entry should never wear — and a fresh node is built rather than reusing *template*,
+    which would make one node appear twice and push the dumper into anchor/alias output.
+    """
+    from ruamel.yaml.scalarstring import DoubleQuotedScalarString, SingleQuotedScalarString
+
+    base = _rt_value(value)
+    if type(base) is str and isinstance(template, (SingleQuotedScalarString, DoubleQuotedScalarString)):
+        return type(template)(value)
+    return base
+
+
 def atomic_roundtrip_yaml_save(path: str | Path, new_state: dict, *,
                                extra_content_on_create: str | None = None) -> None:
     """Persist a full config-state dict while preserving comments and ordering.
@@ -645,22 +661,36 @@ def atomic_roundtrip_yaml_save(path: str | Path, new_state: dict, *,
         return current == value and isinstance(current, bool) is isinstance(value, bool)
 
     def _merge_seq(dst: CommentedSeq, src: list) -> None:
-        # Element-wise so appending/editing one entry keeps the comments on its siblings.
+        # Element-wise so appending/editing one entry keeps the comments on its siblings. ruamel
+        # re-decorates an item REPLACED in place with the scalar type it had, but an entry that
+        # merely MOVED lands in the append path, where no earlier node exists to inherit from — so
+        # remember each surviving value's own node and let the style follow the value, not the
+        # position (#147594).
+        styled: dict[str, Any] = {}
+        for node in dst:
+            if isinstance(node, str):
+                styled.setdefault(str(node), node)
         for i, value in enumerate(src):
             if i < len(dst):
-                _merge_item(dst, i, value)
+                _merge_item(dst, i, value, styled)
+            elif isinstance(value, str) and value in styled:
+                dst.append(_rt_restyled(value, styled[value]))
             else:
                 dst.append(_rt_value(value))
         del dst[len(src):]
 
-    def _merge_item(dst, key, value) -> None:
+    def _merge_item(dst, key, value, styled: dict[str, Any] | None = None) -> None:
         current = dst[key]
         if isinstance(value, dict) and isinstance(current, CommentedMap):
             _merge(current, value)
         elif isinstance(value, list) and isinstance(current, CommentedSeq):
             _merge_seq(current, value)
         elif not _unchanged(current, value):
-            dst[key] = _rt_value(value)
+            template = styled.get(value) if styled and isinstance(value, str) else None
+            if template is not None and isinstance(value, str):
+                dst[key] = _rt_restyled(value, template)
+            else:
+                dst[key] = _rt_value(value)
         # else: unchanged — keep the existing node and the comments/quoting attached to it
 
     def _merge(dst: CommentedMap, src: dict) -> None:
