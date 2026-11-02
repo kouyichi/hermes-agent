@@ -418,6 +418,28 @@ _MATCH_LINE_RE = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
 _OUTPUT_MODE_FLAGS = {"files_only": "-l", "count": "-c"}
 
 
+def _matches_page(entries: list[SearchMatch], offset: int, limit: int,
+                  context: int) -> list[SearchMatch]:
+    """The ``offset``/``limit`` page of a content parse, counted in MATCHING LINES.
+
+    ``context=N`` rows sit beside a hit, so they never consume the page budget, and
+    every returned match keeps up to ``context`` rows on either side. Pages may share
+    a boundary row (a row beside page 1 can still open page 2) — that is what a
+    caller paging through hits expects, and it loses nothing. Context rows with no
+    match anywhere in the parse (only reachable when the fetch window cut a hunk
+    mid-way) are not returned: they contextualize nothing (#147722).
+    """
+    positions = [index for index, entry in enumerate(entries) if not entry.is_context]
+    if offset >= len(positions):
+        return []
+    start = positions[offset]
+    last = positions[min(offset + limit, len(positions)) - 1]
+    stop = positions[offset + limit] if offset + limit < len(positions) else len(entries)
+    lead = [entry for entry in entries[max(start - context, 0):start] if entry.is_context]
+    trail = [entry for entry in entries[last + 1:min(stop, last + 1 + context)] if entry.is_context]
+    return [*lead, *entries[start:last + 1], *trail]
+
+
 def _parse_search_output(result, output_mode: str, limit: int, offset: int,
                          context: int, warning: Optional[str] = None) -> SearchResult:
     """Parse rg/grep ``| head`` output into a SearchResult (shared by both engines).
@@ -488,10 +510,14 @@ def _parse_search_output(result, output_mode: str, limit: int, offset: int,
         if context > 0:
             parsed = _parse_search_context_line(line)
             if parsed:
-                matches.append(SearchMatch(path=parsed[0], line_number=parsed[1], content=parsed[2][:500]))
-    total = len(matches)
+                matches.append(SearchMatch(path=parsed[0], line_number=parsed[1], content=parsed[2][:500],
+                                           is_context=True))
+    # ``context=N`` rows are neighbours of a hit, never hits: ``total_count`` counts
+    # matching lines and ``offset``/``limit`` page over them, so an agent reading the
+    # count is not told a neighbourhood is that many matches (#147722).
+    total = sum(1 for match in matches if not match.is_context)
     return SearchResult(
-        matches=matches[offset:offset + limit], total_count=total,
+        matches=_matches_page(matches, offset, limit, context), total_count=total,
         truncated=total > offset + limit or bool(limit_reason), limit_reason=limit_reason, warning=warning,
         **skip,
     )
@@ -848,7 +874,7 @@ class SearchMixin:
                 merged.counts.update(sub.counts)
                 merged.total_count += sub.total_count
                 merged.truncated = merged.truncated or sub.truncated
-            merged.matches = merged.matches[:limit]
+            merged.matches = _matches_page(merged.matches, 0, limit, context)
             merged.files = merged.files[:limit]
         note = f"path contained {len(parts)} entries; searched {len(existing)} that exist"
         if missing:
@@ -1320,7 +1346,11 @@ class SearchMixin:
         ``line_cap`` appends ``| cut -c1-2000`` for engines without --max-columns
         (grep): bounds giant single-line matches at the pipe layer; skipped for
         files_only/count where lines are paths/counts."""
-        fetch_limit = limit + offset + (200 if context > 0 else 0)
+        # A page is `limit` MATCHES, each carrying up to `1 + 2*context` rows, so the window
+        # scales with the context too (else a complete page reads as truncated); the flat
+        # +200 covers a hunk the window cut mid-way.
+        fetch_limit = ((limit + offset) * (1 + 2 * context) + 200 if context > 0
+                       else limit + offset)
         if line_cap:  # grep/find pipelines: shell only, with the column cap
             parts = cmd_parts + ["|", "head", "-n", str(fetch_limit)]
             if output_mode not in ("files_only", "count"):

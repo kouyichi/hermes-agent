@@ -250,7 +250,10 @@ class TestSearchContextParsing:
         with patch.object(ops, "_exec") as mock_exec:
             mock_exec.return_value = MagicMock(
                 exit_code=0,
-                stdout="dir/file-12-name.py-8-context here\n",
+                stdout=(
+                    "dir/file-12-name.py-8-context here\n"
+                    "dir/file-12-name.py:10:needle here\n"
+                ),
             )
             result = ops._search_with_grep(
                 "needle",
@@ -263,10 +266,13 @@ class TestSearchContextParsing:
             )
 
         assert result.error is None
+        # The context row parses through the rightmost numeric separator and is kept as
+        # context; only the matching line is a hit (#147722).
         assert result.total_count == 1
-        assert result.matches[0].path == "dir/file-12-name.py"
-        assert result.matches[0].line_number == 8
-        assert result.matches[0].content == "context here"
+        assert [(m.path, m.line_number, m.content, m.is_context) for m in result.matches] == [
+            ("dir/file-12-name.py", 8, "context here", True),
+            ("dir/file-12-name.py", 10, "needle here", False),
+        ]
 
 
 # =========================================================================

@@ -98,11 +98,16 @@ class PatchResult:
 
 @dataclass
 class SearchMatch:
-    """A single search match."""
+    """A single search result row.
+
+    ``is_context`` marks a neighbouring row returned by ``context=N`` rather than a
+    line the pattern matched, so a caller counting hits never counts it.
+    """
     path: str
     line_number: int
     content: str
     mtime: float = 0.0  # Modification time for sorting
+    is_context: bool = False
 
 
 @dataclass
@@ -139,7 +144,9 @@ class SearchResult:
                 lines.append(m.path)
                 current_path = m.path
             # rstrip only: leading indentation is meaningful code and kept verbatim.
-            lines.append(f"  {m.line_number}: {m.content.rstrip()}")
+            # rg's own marker shape: `:` for a matching line, `-` for a context row.
+            marker = "-" if getattr(m, "is_context", False) is True else ":"
+            lines.append(f"  {m.line_number}{marker} {m.content.rstrip()}")
         return "\n".join(lines)
 
     def to_dict(self, densify: bool = False) -> dict:
@@ -147,16 +154,23 @@ class SearchResult:
         if self.matches:
             dense = self._densify_matches() if densify else None
             if dense is not None:
-                # Self-describing so the model never guesses the block's shape.
+                # Self-describing so the model never guesses the block's shape; the
+                # context marker only exists when a context row does.
+                context_note = ("; context rows (the lines around a match) use '<line>- <content>'"
+                                if any(getattr(m, "is_context", False) is True for m in self.matches) else "")
                 result["matches_format"] = (
                     "path-grouped: each file path on its own line, followed by "
-                    "indented '<line>: <content>' rows for matches in that file"
+                    "indented '<line>: <content>' rows for matches in that file" + context_note
                 )
                 result["matches_text"] = dense
             else:
-                result["matches"] = [
-                    {"path": m.path, "line": m.line_number, "content": m.content} for m in self.matches
-                ]
+                rows = []
+                for match in self.matches:
+                    row = {"path": match.path, "line": match.line_number, "content": match.content}
+                    if getattr(match, "is_context", False) is True:
+                        row["is_context"] = True
+                    rows.append(row)
+                result["matches"] = rows
         if self.files:
             result["files"] = self.files
         if self.counts:
