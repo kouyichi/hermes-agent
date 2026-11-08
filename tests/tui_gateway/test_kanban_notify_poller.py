@@ -47,6 +47,29 @@ def _complete(tid: str, summary: str = "all done") -> None:
         conn.close()
 
 
+def _request_review(tid: str, summary: str = "PR ready: https://example.invalid/pr/7\nfull details below") -> None:
+    """Drive the real implementer -> review transition (claim, then hand off)."""
+    conn = kbc.connect()
+    try:
+        assert kb.claim_task(conn, tid) is not None
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert kb.request_review(conn, tid, summary=summary, expected_run_id=task.current_run_id) is True
+    finally:
+        conn.close()
+
+
+def _request_changes(tid: str, reason: str = "rename the helper") -> None:
+    """Drive the real review -> changes-requested transition (claim from review, then bounce)."""
+    conn = kbc.connect()
+    try:
+        assert kb.claim_review_task(conn, tid) is not None
+        ok, detail = kb.request_changes(conn, tid, reason=reason)
+        assert ok, detail
+    finally:
+        conn.close()
+
+
 def _sub_rows(tid: str) -> list:
     conn = kbc.connect()
     try:
@@ -233,6 +256,44 @@ class TestCollectKanbanNotifications:
         assert len(rows) == 1
         assert rows[0]["chat_id"] == SESSION_KEY
 
+    def test_review_handoff_notifies_the_tui_session(self):
+        """The review wake reaches a TUI chat, not only messaging/Desktop/CLI.
+
+        ``review_requested`` is a terminal kind for the gateway notifier but was
+        missing from the TUI poller's claim set, so a TUI user whose worker
+        handed a card off for review was never told (issue #151134).
+        """
+        tid = _create_subscribed_task()
+        pre_cursor = _sub_rows(tid)[0]["last_event_id"]
+        _request_review(tid)
+
+        first = _collect_kanban_notifications(_session())
+
+        assert len(first) == 1, "a review handoff must reach the TUI session"
+        assert tid in first[0]
+        assert "ready for review" in first[0]
+        assert "PR ready: https://example.invalid/pr/7" in first[0], (
+            "the implementer's handoff summary must ride the notification, "
+            "like it does for `completed`"
+        )
+        assert _sub_rows(tid)[0]["last_event_id"] > pre_cursor
+        assert _collect_kanban_notifications(_session()) == []
+
+    def test_changes_requested_notifies_the_tui_session(self):
+        """A reviewer bouncing the card back is a decision handoff too."""
+        tid = _create_subscribed_task()
+        _request_review(tid)
+        assert len(_collect_kanban_notifications(_session())) == 1
+
+        _request_changes(tid, reason="rename the helper before merge")
+        bounced = _collect_kanban_notifications(_session())
+
+        assert len(bounced) == 1, "requested changes must reach the TUI session"
+        assert tid in bounced[0]
+        assert "review requested changes" in bounced[0]
+        assert "rename the helper before merge" in bounced[0]
+        assert _collect_kanban_notifications(_session()) == []
+
 
 class TestFormatKanbanEventText:
     SUB = {"task_id": "t_abc123"}
@@ -248,6 +309,42 @@ class TestFormatKanbanEventText:
         ev = SimpleNamespace(kind="timed_out", payload={"limit_seconds": "not-a-number"})
         text = _format_kanban_event_text(self.SUB, self.TASK, ev, "")
         assert "timed out" in text
+
+    def test_review_requested_carries_the_handoff(self):
+        ev = SimpleNamespace(kind="review_requested", payload={"summary": "PR ready: xyz\nmore detail"})
+        text = _format_kanban_event_text(self.SUB, self.TASK, ev, "main")
+        assert "ready for review" in text
+        assert "build the thing" in text
+        assert "PR ready: xyz" in text
+        assert "more detail" not in text, "only the first line rides the one-line ping"
+
+    def test_changes_requested_carries_reason_and_provenance(self):
+        ev = SimpleNamespace(kind="changes_requested", payload={
+            "reason": "rename the helper", "reviewer": "rev", "implementer": "worker", "status": "ready"})
+        text = _format_kanban_event_text(self.SUB, self.TASK, ev, "")
+        assert "review requested changes" in text
+        assert "rename the helper" in text
+        assert "@rev" in text
+        assert "@worker" in text
+
+    def test_block_loop_detected_names_triage(self):
+        ev = SimpleNamespace(kind="block_loop_detected", payload={
+            "reason": "needs credentials", "kind": "needs_input", "recurrences": 3, "limit": 3})
+        text = _format_kanban_event_text(self.SUB, self.TASK, ev, "")
+        assert "routed to TRIAGE" in text
+        assert "needs a human decision" in text
+        assert "needs credentials" in text
+
+    def test_every_claimed_kind_is_rendered_or_intentionally_silent(self):
+        """A claimed kind with no formatter is dropped without a trace.
+
+        ``_KANBAN_NOTIFY_KINDS`` mirrors the gateway's ``TERMINAL_KINDS``; the
+        two silent bookkeeping kinds are the only claimed kinds allowed to have
+        no rendering.
+        """
+        from tui_gateway.session_notifications import _KANBAN_EVENT_FORMATTERS, _KANBAN_NOTIFY_KINDS
+
+        assert set(_KANBAN_EVENT_FORMATTERS) == set(_KANBAN_NOTIFY_KINDS) - {"archived", "unblocked"}
 
 
 class TestNotificationPollerLoopKanbanWiring:

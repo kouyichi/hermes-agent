@@ -144,8 +144,11 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 
 
 # Mirror gateway/kanban_watchers.py TERMINAL_KINDS: claim silent kinds (archived/unblocked) too so the cursor advances
-# past them and they can't wedge a later completed/blocked event behind an unclaimed row.
-_KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
+# past them and they can't wedge a later completed/blocked event behind an unclaimed row. The review/triage handoffs
+# (review_requested/changes_requested/block_loop_detected) hand a decision back to the origin, so a TUI chat must claim
+# them like the gateway does — without them the user never hears that a card is waiting on them.
+_KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
+                        "block_loop_detected", "review_requested", "changes_requested")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
@@ -424,6 +427,27 @@ def _kb_timed_out(task, payload: dict, title: str) -> str:
     return " timed out (max_runtime=0s); will retry"
 
 
+def _kb_review_requested(task, payload: dict, title: str) -> str:
+    """Implementation done, waiting on a reviewer: carry the handoff like ``completed`` does."""
+    handoff = _kb_first_line(payload["summary"], 200) if payload.get("summary") else ""
+    return f" ready for review — {title}{handoff}"
+
+
+def _kb_changes_requested(task, payload: dict, title: str) -> str:
+    reason = str(payload.get("reason") or "").strip().replace("\n", " ")[:160] or (
+        "reviewer feedback requires changes")
+    reviewer = f" — reviewer @{payload['reviewer']}" if payload.get("reviewer") else ""
+    implementer = f" → implementer @{payload['implementer']}" if payload.get("implementer") else ""
+    return f" review requested changes/BLOCK: {reason}{reviewer}{implementer}"
+
+
+def _kb_block_loop_detected(task, payload: dict, title: str) -> str:
+    why = "needs a human decision" if payload.get("kind") == "needs_input" else "for orchestration attention"
+    recurrences = f" (blocked {payload['recurrences']}x for the same cause)" if payload.get("recurrences") else ""
+    reason = f": {str(payload['reason'])[:160]}" if payload.get("reason") else ""
+    return f" routed to TRIAGE — {why}{recurrences}{reason}"
+
+
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 _KANBAN_EVENT_FORMATTERS = {
     "completed": ("✔", _kb_completed),
@@ -433,6 +457,9 @@ _KANBAN_EVENT_FORMATTERS = {
     "crashed": ("✖", lambda t, p, title: " worker crashed (pid gone); dispatcher will retry"),
     "timed_out": ("⏱", _kb_timed_out),
     "status": ("🔄", lambda t, p, title: f" → {p.get('status') or ''}"),
+    "review_requested": ("👀", _kb_review_requested),
+    "changes_requested": ("🛑", _kb_changes_requested),
+    "block_loop_detected": ("🛑", _kb_block_loop_detected),
 }
 
 
